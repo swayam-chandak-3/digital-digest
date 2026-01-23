@@ -1,0 +1,162 @@
+﻿AI-Powered Intelligence Digest System
+Technical Requirements Document
+________________
+
+
+1. System Overview
+Build a privacy-first, locally-run AI intelligence platform that automatically aggregates, filters, and summarizes content from multiple sources into daily personalized digests. All AI processing runs locally using Small Language Models (SLMs) - no external API dependencies.
+Core Value: Save users 20-30 minutes daily by delivering highly relevant, AI-curated content instead of manual browsing.
+________________
+
+
+2. Technical Stack
+Language: Python 3.11+
+Local LLM: Ollama (Llama 3.x 8B Instruct, Q4 quantization)
+Database: SQLite (file-based, local storage)
+Vector Search: FAISS (embedded similarity search)
+Key Libraries: httpx, python-dotenv, pytest, python-telegram-bot, aiosmtplib
+________________
+
+
+3. Architecture & Data Flow
+Ingestion → Pre-Filter → LLM Evaluation → Deduplication 
+  → Clustering → Summarization → Digest Building → Delivery
+
+
+Modular Structure:
+src/
+├── services/       # Configuration, storage, LLM client, delivery
+├── tools/          # Source adapters, filters, evaluators, dedup
+├── workflows/      # Persona-specific pipelines
+├── models/         # Data models and schemas
+└── cli/            # Entry points and scheduling
+
+
+________________
+
+
+4. Core Features
+4.1 Intelligence Personas (2 Modes)
+GENAI_NEWS: Technology-focused digest
+* Sources: Hacker News, Reddit (r/MachineLearning, r/LocalLLaMA), RSS feeds
+* Filters: AI/LLM/agent/tooling keywords, technical depth signals
+* Prioritizes: Library releases, infrastructure updates, technical deep-dives
+* De-prioritizes: Generic hype, high-level commentary, hiring posts
+* Output: News-style digest grouped by topic
+PRODUCT_IDEAS: Product opportunity scanner
+* Sources: Product Hunt, Indie Hackers, Reddit (r/SideProject)
+* Filters: Launch/build/experiment indicators, MVP announcements
+* Analyzes: Problem statements, solutions, early traction signals
+* Output: Idea cards with problem/solution/maturity/reusability scores
+* Bonus: Pattern clustering (recurring problem themes over 14 days)
+4.2 Content Processing Pipeline
+Ingestion:
+* Fetch from 5+ source types via pluggable adapters
+* Extract: title, description, full text, URL, timestamp, engagement metrics
+* Store raw items in SQLite with source metadata
+Pre-Filtering:
+* Keyword-based relevance check
+* Engagement threshold filtering
+* Time window constraints (last 24 hours default)
+LLM Evaluation (Local Llama 3):
+* GENAI_NEWS schema: {relevance_score, topic, why_it_matters, target_audience, decision}
+* PRODUCT_IDEAS schema: {idea_type, problem_statement, solution_summary, maturity_level, reusability_score, decision}
+* JSON-structured outputs validated against schemas
+* Temperature: 0.1 (deterministic)
+Deduplication:
+* Vector similarity search using FAISS
+* Topic/content similarity detection
+* Single entry per unique topic/idea
+Summarization:
+* 3-5 line technical summaries
+* "Why it matters" explanations
+* Audience targeting (developer/architect/manager)
+4.3 Delivery Channels
+Supported: Email (SMTP), Telegram (Bot API)
+Format: HTML email, Markdown (Telegram)
+Configuration: Per-persona channel selection via .env
+Fallback: File output (JSON + Markdown) always generated
+________________
+
+
+5. Critical Requirements
+5.1 Privacy & Security (P0)
+* ✅ 100% local AI processing - zero external API calls for inference
+* ✅ Local data storage only - no cloud dependencies
+* ✅ Credential safety - API keys in .env only, never logged
+5.2 Performance (P1)
+* Daily digest completes in ≤10 minutes (typical: 2-6 minutes)
+* Runs on 16GB RAM Machine without issues
+* Processes 100-1000 items/day without degradation
+5.3 Reliability (P1)
+* Graceful degradation: source/channel failures don't block pipeline
+* 99% scheduled run success rate
+* Comprehensive error logging and validation
+________________
+
+
+6. Key Implementation Tasks
+Phase 1: Foundation
+1. Project setup: Python environment, Ollama installation, model download
+2. Database schema: items, evaluations, clusters, digests, deliveries tables
+3. Configuration system: .env parsing, validation, defaults
+4. Logging infrastructure: structured logging with performance metrics
+Phase 2: Data Ingestion
+5. Source adapter interface: fetch_items(hours: int) -> List[IngestedItem]
+6. Implement adapters: Hacker News, Reddit, Product Hunt, RSS, Indie Hackers
+7. Ingestion pipeline: fetch, normalize, deduplicate, store
+8. Error handling: retry logic, circuit breakers, graceful failures
+Phase 3: AI Processing
+9. Local LLM client: Ollama API wrapper (OpenAI-compatible endpoint)
+10. GENAI_NEWS evaluator: prompt engineering, schema validation
+11. PRODUCT_IDEAS evaluator: separate prompt, schema validation
+12. Vector storage: FAISS index creation, similarity search
+13. Deduplication: embedding generation, similarity thresholds
+Phase 4: Digest Generation
+14. GENAI_NEWS summarizer: topic grouping, summary generation
+15. PRODUCT_IDEAS summarizer: idea cards, pattern clustering
+16. Digest builders: JSON + Markdown output generation
+17. Threshold filtering: configurable score cutoffs
+Phase 5: Delivery
+18. Email delivery: SMTP client, HTML templates
+19. Telegram delivery: Bot API integration, Markdown formatting
+20. Multi-channel orchestration: parallel delivery, failure tracking
+21. Scheduling: cron/systemd timer setup, daily automation
+________________
+
+
+7. Configuration Example
+# Persona Toggles
+PERSONA_GENAI_NEWS_ENABLED=true
+PERSONA_PRODUCT_IDEAS_ENABLED=true
+
+
+# LLM Configuration
+OLLAMA_BASE_URL=http://localhost:11434/v1
+OLLAMA_MODEL=llama3:8b-instruct-q4_K_M
+
+
+# Thresholds
+GENAI_NEWS_MIN_RELEVANCE=0.6
+PRODUCT_IDEAS_MIN_REUSABILITY=0.5
+
+
+# Delivery
+EMAIL_ENABLED=true
+EMAIL_SMTP_HOST=smtp.gmail.com
+EMAIL_FROM=your@email.com
+EMAIL_TO=recipient@email.com
+
+
+TELEGRAM_ENABLED=true
+TELEGRAM_BOT_TOKEN=your_bot_token
+TELEGRAM_CHAT_ID=your_chat_id
+
+
+________________
+
+
+8. Development Workflow
+Setup: make setup && make ollama-start && make pull-model
+Run: make run (single digest generation)
+Schedule: make run-scheduler or cron setup
