@@ -2,7 +2,7 @@
 Delivery channels for item summaries (digest).
 
 Supported: Email (SMTP, HTML), Telegram (Bot API, Markdown).
-Configuration: Per-persona channel selection via .env (e.g. GENAI_NEWS_DELIVERY=email,telegram).
+Default: Send all news to both email and Telegram (per-persona selection can be added later).
 Fallback: File output (JSON + Markdown) is always generated.
 """
 
@@ -33,11 +33,12 @@ def _env(key, default=None):
 def get_delivery_config(persona="GENAI_NEWS"):
     """
     Read delivery configuration from environment.
-    Per-persona overrides: {PERSONA}_DELIVERY, {PERSONA}_EMAIL_TO, {PERSONA}_TELEGRAM_CHAT_ID.
+    Default: email + telegram (all news to both). Override with DELIVERY_CHANNELS if needed.
+    Per-persona recipient overrides (for later): {PERSONA}_EMAIL_TO, {PERSONA}_TELEGRAM_CHAT_ID.
     """
     base = persona.upper().replace("-", "_")
-    # Channels: comma-separated: email, telegram (file is always used)
-    raw = _env(f"{base}_DELIVERY") or _env("DELIVERY_CHANNELS") or "file"
+    # Default: send to both email and telegram; file is always included
+    raw = _env(f"{base}_DELIVERY") or _env("DELIVERY_CHANNELS") or "email,telegram"
     channels = [c.strip().lower() for c in raw.split(",") if c.strip()]
     if "file" not in channels:
         channels.append("file")  # fallback always
@@ -102,12 +103,30 @@ def _escape_attr(s):
     return s.replace("&", "&amp;").replace('"', "&quot;")
 
 
-def build_digest_markdown(entries, title="Daily Digest"):
-    """Build Markdown body for Telegram (or file)."""
+def _escape_telegram_markdown(s):
+    """
+    Escape characters that break Telegram's legacy Markdown parser (_, *, [, ], (, ), `).
+    Use for any user-generated text in the digest when sending to Telegram.
+    """
+    if s is None:
+        return ""
+    s = str(s)
+    # Backslash first so we don't double-escape
+    for char in ("\\", "_", "*", "[", "]", "(", ")", "`"):
+        s = s.replace(char, "\\" + char)
+    return s
+
+
+def build_digest_markdown(entries, title="Daily Digest", escape_for_telegram=False):
+    """Build Markdown body for Telegram (or file). When escape_for_telegram=True, escapes special chars for Telegram."""
     if not entries:
         return f"# {title}\n\nNo items in this digest."
 
-    lines = [f"# {title}", ""]
+    def esc(t):
+        return _escape_telegram_markdown(t) if escape_for_telegram else (t or "")
+
+    title_safe = esc(title) if escape_for_telegram else title
+    lines = [f"# {title_safe}", ""]
     for i, e in enumerate(entries, 1):
         headline = e.get("headline") or "(No title)"
         url = (e.get("url") or "").strip()
@@ -115,6 +134,8 @@ def build_digest_markdown(entries, title="Daily Digest"):
         why = e.get("why_it_matters") or ""
         audience = e.get("target_audience") or "developer"
         topic = e.get("topic") or ""
+        if escape_for_telegram:
+            headline, url, lead, why, audience, topic = esc(headline), esc(url), esc(lead), esc(why), esc(audience), esc(topic)
         if url:
             lines.append(f"{i}. [{headline}]({url})")
         else:
@@ -195,19 +216,10 @@ def send_email(html_content, subject, to_address, config, verbose=True):
         return False
 
 
-def send_telegram(markdown_content, chat_id, bot_token, verbose=True):
-    """
-    Send message via Telegram Bot API. Uses Markdown (legacy) to avoid strict MarkdownV2 escaping.
-    Long content is split into chunks under 4096 chars.
-    """
-    if not bot_token or not chat_id or not str(chat_id).strip():
-        if verbose:
-            print("[Delivery] Skipping Telegram: no TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID set.")
-        return False
-    url = f"https://api.telegram.org/bot{bot_token.strip()}/sendMessage"
-    max_len = 4090  # leave margin
+def _chunk_text(text, max_len=4090):
+    """Split text into chunks under max_len, breaking at newline or space."""
     chunks = []
-    rest = markdown_content
+    rest = text
     while rest:
         if len(rest) <= max_len:
             chunks.append(rest)
@@ -219,22 +231,42 @@ def send_telegram(markdown_content, chat_id, bot_token, verbose=True):
             idx = max_len
         chunks.append(rest[:idx])
         rest = rest[idx:].lstrip()
+    return chunks
 
-    try:
-        import requests
-        for i, text in enumerate(chunks):
-            payload = {
-                "chat_id": str(chat_id).strip(),
-                "text": text,
-                "parse_mode": "Markdown",
-                "disable_web_page_preview": True,
-            }
-            r = requests.post(url, json=payload, timeout=30)
-            r.raise_for_status()
-            if verbose and len(chunks) > 1:
-                print(f"[Delivery] Telegram part {i + 1}/{len(chunks)} sent")
+
+async def _send_telegram_async(markdown_content, chat_id, bot_token, verbose=True):
+    """Send message via python-telegram-bot (Bot API). Uses Markdown parse_mode."""
+    from telegram import Bot
+
+    bot = Bot(token=bot_token.strip())
+    chat_id_str = str(chat_id).strip()
+    chunks = _chunk_text(markdown_content)
+
+    for i, text in enumerate(chunks):
+        await bot.send_message(
+            chat_id=chat_id_str,
+            text=text,
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
+        )
+        if verbose and len(chunks) > 1:
+            print(f"[Delivery] Telegram part {i + 1}/{len(chunks)} sent")
+    if verbose:
+        print("[Delivery] Telegram message(s) sent.")
+
+
+def send_telegram(markdown_content, chat_id, bot_token, verbose=True):
+    """
+    Send message via Telegram Bot API (python-telegram-bot).
+    Uses Markdown parse_mode. Long content is split into chunks under 4096 chars.
+    """
+    if not bot_token or not chat_id or not str(chat_id).strip():
         if verbose:
-            print("[Delivery] Telegram message(s) sent.")
+            print("[Delivery] Skipping Telegram: no TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID set.")
+        return False
+    try:
+        import asyncio
+        asyncio.run(_send_telegram_async(markdown_content, chat_id, bot_token, verbose=verbose))
         return True
     except Exception as e:
         if verbose:
@@ -274,6 +306,7 @@ def run_delivery(
     channels = config["channels"]
     html = build_digest_html(entries, title=title)
     md = build_digest_markdown(entries, title=title)
+    md_telegram = build_digest_markdown(entries, title=title, escape_for_telegram=True)
     subject = f"{title} — {len(entries)} items"
 
     # 2. Email (HTML)
@@ -286,10 +319,10 @@ def run_delivery(
             verbose=verbose,
         )
 
-    # 3. Telegram (Markdown)
+    # 3. Telegram (Markdown, escaped so special chars don't break the parser)
     if "telegram" in channels:
         send_telegram(
-            md,
+            md_telegram,
             chat_id=config["telegram_chat_id"],
             bot_token=config["telegram_bot_token"],
             verbose=verbose,

@@ -14,6 +14,14 @@ SMTP_FROM = os.getenv("SMTP_FROM")
 EMAIL_TO = os.getenv("EMAIL_TO")
 SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
 
+print(f"SMTP_HOST: {SMTP_HOST}")
+print(f"SMTP_PORT: {SMTP_PORT}")
+print(f"SMTP_USER: {SMTP_USER}")
+print(f"SMTP_PASSWORD: {SMTP_PASSWORD}")
+print(f"SMTP_FROM: {SMTP_FROM}")
+print(f"EMAIL_TO: {EMAIL_TO}")
+print(f"SMTP_USE_TLS: {SMTP_USE_TLS}")
+
 # Validate required config
 missing = [
     name for name, value in {
