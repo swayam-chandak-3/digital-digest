@@ -2,3 +2,4 @@ requests==2.32.0
 beautifulsoup4==4.6.0
 readability-lxml==0.8.1
 lxml_html_clean
+ollama>=0.1.0

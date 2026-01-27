@@ -16,10 +16,12 @@ import requests
 import time
 import re
 import json
+import sqlite3
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup, SoupStrainer
 from readability import Document
-from datetime import datetime
+from datetime import datetime, timezone
+from evaluation import run_evaluation_pipeline
 
 # Topic keywords for categorization
 TOPIC_KEYWORDS = {
@@ -260,17 +262,18 @@ def scrape_and_categorize_articles(urls, delay=1, verbose=False):
         
         if matches_target:
             primary_category = categories[0] if categories else 'Uncategorized'
-            scraping_timestamp = datetime.utcnow().isoformat() + 'Z'
+            scraping_timestamp = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
             article_data = {
                 # Core JSON output fields
                 'link': url,
                 'author': author,
                 'title': title,
-                'source': domain,
+                'source': 'hackernews',
                 'content': text,
                 'publish_datetime': publish_datetime,
                 'scraping_timestamp': scraping_timestamp,
                 # Additional internal fields
+                'domain': domain,
                 'categories': categories,
                 'primary_category': primary_category,
             }
@@ -324,7 +327,7 @@ def save_filtered_articles(articles, output_file='HackerNews/llm_programming_art
     with open(output_file, 'w', encoding='utf-8') as f:
         json.dump(
             {
-                'generated_at': datetime.utcnow().isoformat() + 'Z',
+                'generated_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
                 'total_articles': len(cleaned_articles),
                 'articles': cleaned_articles,
             },
@@ -334,6 +337,75 @@ def save_filtered_articles(articles, output_file='HackerNews/llm_programming_art
         )
 
     return output_file
+
+
+def save_articles_to_db(articles, db_path='mydb.db'):
+    """Persist articles into the items table.
+
+    Any field not present in the JSON will be stored as NULL in the database.
+    Looks up source ID from the sources table and stores it in source_id.
+    """
+    if not articles:
+        return 0
+
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+
+        rows = []
+        for article in articles:
+            # Use dict.get so missing values become None -> NULL in SQLite
+            source_name = article.get('source') or 'unknown'
+            link = article.get('link')
+            title = article.get('title')
+            content = article.get('content')
+            published_at = article.get('publish_datetime')
+
+            # Look up source ID from sources table
+            # Normalize source name to lowercase for lookup
+            source_name_lower = source_name.lower()
+            cur.execute("SELECT id FROM sources WHERE LOWER(source) = ?", (source_name_lower,))
+            source_result = cur.fetchone()
+            source_id = int(source_result[0]) if source_result else None
+
+            row = (
+                source_name,                 # source (NOT NULL)
+                source_id,                   # source_id (FK to sources table)
+                link,                        # source_url
+                title,                       # title (NOT NULL)
+                None,                        # description
+                content,                     # content
+                link,                        # url
+                published_at,                # published_at
+                None,                        # engagement_score
+                json.dumps(article),         # raw_metadata (full JSON article)
+            )
+            rows.append(row)
+
+        cur.executemany(
+            """
+            INSERT INTO items (
+                source,
+                source_id,
+                source_url,
+                title,
+                description,
+                content,
+                url,
+                published_at,
+                engagement_score,
+                raw_metadata,
+                status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PREFILTERED')
+            """,
+            rows,
+        )
+        conn.commit()
+        return len(rows)
+    finally:
+        conn.close()
+
 
 def run_pipeline(num_pages=1, delay=1, verbose=True, output_file='HackerNews/llm_programming_articles.json'):
     """Run the complete pipeline."""
@@ -363,6 +435,14 @@ def run_pipeline(num_pages=1, delay=1, verbose=True, output_file='HackerNews/llm
     # Step 3: Save filtered articles
     print("\nStep 3: Saving filtered articles...")
     output_path = save_filtered_articles(filtered_articles, output_file)
+
+    # Step 4: Persist into the items table
+    print("\nStep 4: Writing articles to database (items table)...")
+    try:
+        inserted = save_articles_to_db(filtered_articles)
+        print(f"[OK] Inserted {inserted} rows into items table")
+    except Exception as e:
+        print(f"[ERROR] Failed to insert into items table: {e}")
     
     print(f"\n[OK] Pipeline complete!")
     print(f"[OK] Saved {len(filtered_articles)} articles to: {output_path}")
@@ -382,18 +462,45 @@ def run_pipeline(num_pages=1, delay=1, verbose=True, output_file='HackerNews/llm
 if __name__ == '__main__':
     import argparse
     
-    parser = argparse.ArgumentParser(description='Hacker News Pipeline: Scrape, categorize, and filter LLM/AI & Programming articles')
+    parser = argparse.ArgumentParser(description='Hacker News Pipeline: Scrape, categorize, filter, and evaluate articles')
     parser.add_argument('--pages', type=int, default=1, help='Number of Hacker News pages to scrape (max 20)')
     parser.add_argument('--delay', type=float, default=1, help='Delay between article requests (seconds)')
     parser.add_argument('--output', type=str, default='HackerNews/llm_programming_articles.json',
                        help='Output file path')
     parser.add_argument('--quiet', action='store_true', help='Reduce verbose output')
+    parser.add_argument('--evaluate', action='store_true', help='Run evaluation pipeline after ingestion')
+    parser.add_argument('--eval-only', action='store_true', help='Only run evaluation, skip ingestion')
+    parser.add_argument('--ollama-url', type=str, default='http://localhost:11434', help='Ollama base URL')
+    parser.add_argument('--model', type=str, default='gemma3:12b', help='Ollama model name')
+    parser.add_argument('--hours', type=int, default=24, help='Hours to look back for recent items')
     
     args = parser.parse_args()
     
-    run_pipeline(
-        num_pages=min(args.pages, 20),
-        delay=args.delay,
-        verbose=not args.quiet,
-        output_file=args.output
-    )
+    if args.eval_only:
+        # Only run evaluation
+        run_evaluation_pipeline(
+            db_path='mydb.db',
+            ollama_base_url=args.ollama_url,
+            model=args.model,
+            hours=args.hours,
+            verbose=not args.quiet
+        )
+    else:
+        # Run ingestion pipeline
+        run_pipeline(
+            num_pages=min(args.pages, 20),
+            delay=args.delay,
+            verbose=not args.quiet,
+            output_file=args.output
+        )
+        
+        # Optionally run evaluation after ingestion
+        if args.evaluate:
+            print("\n" + "=" * 60)
+            run_evaluation_pipeline(
+                db_path='mydb.db',
+                ollama_base_url=args.ollama_url,
+                model=args.model,
+                hours=args.hours,
+                verbose=not args.quiet
+            )
