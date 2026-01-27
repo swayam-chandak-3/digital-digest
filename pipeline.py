@@ -184,12 +184,41 @@ def extract_article_content(url, timeout=10):
     except Exception as e:
         return {'success': False, 'error': str(e)}
 
+# Pre-filter defaults (align with AI-Powered Intelligence Digest System)
+DEFAULT_HOURS_WINDOW = 24
+DEFAULT_MIN_POINTS = 1
+DEFAULT_MIN_COMMENTS = 0
+
+
+def _parse_time_ago_to_hours(time_ago_str):
+    """Parse HN 'time ago' string (e.g. '2 hours ago', '1 day ago') to hours ago.
+    Returns None if unparseable (e.g. 'just now').
+    """
+    if not time_ago_str or not isinstance(time_ago_str, str):
+        return None
+    s = time_ago_str.strip().lower()
+    m = re.match(r'(\d+)\s*(minute|hour|day)s?\s*ago', s)
+    if not m:
+        if 'minute' in s or 'hour' in s or 'day' in s:
+            m = re.search(r'(\d+)\s*(minute|hour|day)', s)
+        if not m:
+            return 0  # "just now" or similar -> within window
+    num, unit = int(m.group(1)), m.group(2)
+    if unit.startswith('minute'):
+        return num / 60.0
+    if unit.startswith('hour'):
+        return float(num)
+    if unit.startswith('day'):
+        return num * 24.0
+    return None
+
+
 def scrape_hackernews_pages(num_pages=1, verbose=False):
-    """Scrape Hacker News and extract URLs."""
+    """Scrape Hacker News and extract URL, title, points, comments, and time_ago per item."""
     if not os.path.exists('HackerNews'):
         os.makedirs('HackerNews')
     
-    all_urls = []
+    all_entries = []
     num_pages = min(num_pages, 20)
     
     for page_no in range(1, num_pages + 1):
@@ -198,46 +227,98 @@ def scrape_hackernews_pages(num_pages=1, verbose=False):
         
         try:
             res = requests.get('https://news.ycombinator.com/?p=' + str(page_no))
-            only_td = SoupStrainer('td')
-            soup = BeautifulSoup(res.content, 'html.parser', parse_only=only_td)
+            soup = BeautifulSoup(res.content, 'html.parser')
+            # Rows: tr.athing = title row; next tr = subtext (points, time, comments)
+            athing_rows = soup.find_all('tr', class_='athing')
             
-            tdtitle = soup.find_all('td', attrs={'class': 'title'})
-            tdrank = soup.find_all('td', attrs={'class': 'title', 'align': 'right'})
-            tdtitleonly = [t for t in tdtitle if t not in tdrank]
+            for tr in athing_rows:
+                row_id = tr.get('id')
+                title_span = tr.find('span', class_='titleline')
+                if not title_span:
+                    continue
+                a = title_span.find('a', href=True)
+                if not a:
+                    continue
+                url = a['href']
+                if not url.startswith('http'):
+                    url = 'https://news.ycombinator.com/' + url
+                title = a.get_text(strip=True)
+                # Skip "More" link and HN-internal (discussion) links; only keep external article URLs
+                if url.startswith('?p=') or ('news.ycombinator.com' in url and 'item' in url):
+                    continue
+                # Find subline row (next sibling tr contains points, time, comments)
+                subline_tr = tr.find_next_sibling('tr')
+                points = 0
+                num_comments = 0
+                time_ago_str = ''
+                if subline_tr:
+                    subline = subline_tr.find('span', class_='subline') or subline_tr
+                    line_text = subline.get_text() if subline else ''
+                    # e.g. "51 points by user 2 hours ago | 40 comments"
+                    pm = re.search(r'(\d+)\s*points?', line_text, re.I)
+                    if pm:
+                        points = int(pm.group(1))
+                    cm = re.search(r'(\d+)\s*comments?', line_text, re.I)
+                    if cm:
+                        num_comments = int(cm.group(1))
+                    # "X minutes/hours/days ago"
+                    tam = re.search(r'(\d+\s*(?:minute|hour|day)s?\s*ago)', line_text, re.I)
+                    if tam:
+                        time_ago_str = tam.group(1)
+                
+                all_entries.append({
+                    'url': url,
+                    'title': title,
+                    'points': points,
+                    'num_comments': num_comments,
+                    'time_ago_str': time_ago_str,
+                })
             
-            page_urls = []
-            for tdt in tdtitleonly:
-                titleline = tdt.find('span', attrs={'class': 'titleline'})
-                if titleline:
-                    titl = titleline.find('a')
-                    if titl and 'href' in titl.attrs:
-                        url = titl['href']
-                        if not url.startswith('http'):
-                            url = 'https://news.ycombinator.com/' + url
-                        page_urls.append(url)
-            
-            all_urls.extend(page_urls)
             if verbose:
-                print(f'  Found {len(page_urls)} URLs on page {page_no}')
+                print(f'  Found {len(athing_rows)} items on page {page_no}')
         
         except Exception as e:
             print(f'Error fetching page {page_no}: {e}')
     
-    return all_urls
+    return all_entries
 
-def scrape_and_categorize_articles(urls, delay=1, verbose=False):
-    """Scrape articles from URLs and categorize them."""
-    target_categories = ['LLM/AI', 'Programming/Software']
+
+def apply_prefilter(entries, hours_window=24, min_points=0, min_comments=0, verbose=False):
+    """Apply time window and engagement thresholds. Returns list of entries that pass."""
+    filtered = []
+    for e in entries:
+        # Time window: last N hours
+        hours_ago = _parse_time_ago_to_hours(e.get('time_ago_str'))
+        if hours_ago is not None and hours_ago > hours_window:
+            if verbose:
+                print(f"  [PRE-SKIP] Time: {e.get('time_ago_str')} (> {hours_window}h): {e.get('title', '')[:50]}...")
+            continue
+        if e.get('points', 0) < min_points:
+            if verbose:
+                print(f"  [PRE-SKIP] Points {e.get('points')} < {min_points}: {e.get('title', '')[:50]}...")
+            continue
+        if e.get('num_comments', 0) < min_comments:
+            if verbose:
+                print(f"  [PRE-SKIP] Comments {e.get('num_comments')} < {min_comments}: {e.get('title', '')[:50]}...")
+            continue
+        filtered.append(e)
+    return filtered
+
+def scrape_and_categorize_articles(entries, delay=1, verbose=False):
+    """Scrape full article content and apply keyword-based category filter.
+    entries: list of dicts with url, title, points, num_comments, time_ago_str from HN listing.
+    """
+    target_categories = ['LLM/AI']  # Only AI/LLM articles (keyword relevance)
     filtered_articles = []
     
-    print(f"\nScraping {len(urls)} articles...")
+    print(f"\nScraping {len(entries)} articles (keyword + category filter)...")
     print("=" * 60)
     
-    for i, url in enumerate(urls, 1):
+    for i, entry in enumerate(entries, 1):
+        url = entry.get('url', '')
         if verbose:
-            print(f"[{i}/{len(urls)}] Processing: {url[:60]}...")
+            print(f"[{i}/{len(entries)}] Processing: {url[:60]}...")
         
-        # Extract article content
         result = extract_article_content(url)
         
         if not result.get('success'):
@@ -250,21 +331,19 @@ def scrape_and_categorize_articles(urls, delay=1, verbose=False):
         author = result.get('author')
         publish_datetime = result.get('publish_datetime')
         
-        # Extract domain
         parsed = urlparse(url)
         domain = parsed.netloc.replace('www.', '')
-        
-        # Categorize
         categories = categorize_article(text, title, domain)
-        
-        # Check if article matches target categories
         matches_target = any(cat in categories for cat in target_categories)
         
         if matches_target:
             primary_category = categories[0] if categories else 'Uncategorized'
             scraping_timestamp = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+            points = entry.get('points', 0)
+            num_comments = entry.get('num_comments', 0)
+            # engagement_score: points + weight * comments for DB/sorting
+            engagement_score = float(points + 2 * num_comments)
             article_data = {
-                # Core JSON output fields
                 'link': url,
                 'author': author,
                 'title': title,
@@ -272,21 +351,21 @@ def scrape_and_categorize_articles(urls, delay=1, verbose=False):
                 'content': text,
                 'publish_datetime': publish_datetime,
                 'scraping_timestamp': scraping_timestamp,
-                # Additional internal fields
                 'domain': domain,
                 'categories': categories,
                 'primary_category': primary_category,
+                'points': points,
+                'num_comments': num_comments,
+                'engagement_score': engagement_score,
             }
             filtered_articles.append(article_data)
-            
             if verbose:
-                print(f"    [MATCH] {primary_category}: {title[:50]}...")
+                print(f"    [MATCH] {primary_category}: {title[:50]}... (pts={points}, comments={num_comments})")
         else:
             if verbose:
                 print(f"    [SKIP] Categories: {categories if categories else 'Uncategorized'}")
         
-        # Delay between requests
-        if i < len(urls):
+        if i < len(entries):
             time.sleep(delay)
     
     return filtered_articles
@@ -317,11 +396,16 @@ def save_filtered_articles(articles, output_file='HackerNews/llm_programming_art
             'publish_datetime': article.get('publish_datetime'),
             'scraping_timestamp': article.get('scraping_timestamp'),
         }
-        # Optional: keep categories if you want them for downstream use
         if 'categories' in article:
             cleaned['categories'] = article['categories']
         if 'primary_category' in article:
             cleaned['primary_category'] = article['primary_category']
+        if 'points' in article:
+            cleaned['points'] = article['points']
+        if 'num_comments' in article:
+            cleaned['num_comments'] = article['num_comments']
+        if 'engagement_score' in article:
+            cleaned['engagement_score'] = article['engagement_score']
         cleaned_articles.append(cleaned)
 
     with open(output_file, 'w', encoding='utf-8') as f:
@@ -354,31 +438,30 @@ def save_articles_to_db(articles, db_path='mydb.db'):
 
         rows = []
         for article in articles:
-            # Use dict.get so missing values become None -> NULL in SQLite
             source_name = article.get('source') or 'unknown'
             link = article.get('link')
             title = article.get('title')
             content = article.get('content')
             published_at = article.get('publish_datetime')
+            engagement_score = article.get('engagement_score')  # points + 2*comments from HN
 
-            # Look up source ID from sources table
-            # Normalize source name to lowercase for lookup
             source_name_lower = source_name.lower()
             cur.execute("SELECT id FROM sources WHERE LOWER(source) = ?", (source_name_lower,))
             source_result = cur.fetchone()
             source_id = int(source_result[0]) if source_result else None
 
             row = (
-                source_name,                 # source (NOT NULL)
-                source_id,                   # source_id (FK to sources table)
-                link,                        # source_url
-                title,                       # title (NOT NULL)
-                None,                        # description
-                content,                     # content
-                link,                        # url
-                published_at,                # published_at
-                None,                        # engagement_score
-                json.dumps(article),         # raw_metadata (full JSON article)
+                source_name,
+                source_id,
+                link,
+                title,
+                None,
+                article.get('summary'),  # summary (TEXT), NULL until generated
+                content,
+                link,
+                published_at,
+                engagement_score,
+                json.dumps(article),
             )
             rows.append(row)
 
@@ -390,6 +473,7 @@ def save_articles_to_db(articles, db_path='mydb.db'):
                 source_url,
                 title,
                 description,
+                summary,
                 content,
                 url,
                 published_at,
@@ -397,7 +481,7 @@ def save_articles_to_db(articles, db_path='mydb.db'):
                 raw_metadata,
                 status
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PREFILTERED')
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PREFILTERED')
             """,
             rows,
         )
@@ -407,37 +491,46 @@ def save_articles_to_db(articles, db_path='mydb.db'):
         conn.close()
 
 
-def run_pipeline(num_pages=1, delay=1, verbose=True, output_file='HackerNews/llm_programming_articles.json'):
-    """Run the complete pipeline."""
+def run_pipeline(num_pages=3, delay=1, verbose=True, output_file='HackerNews/llm_programming_articles.json',
+                 hours_window=DEFAULT_HOURS_WINDOW, min_points=DEFAULT_MIN_POINTS, min_comments=DEFAULT_MIN_COMMENTS):
+    """Run the complete pipeline with pre-filtering (time window + engagement)."""
     print("=" * 60)
     print("HACKER NEWS PIPELINE")
     print("=" * 60)
-    print("\nStep 1: Scraping Hacker News...")
+    print("\nStep 1: Scraping Hacker News (with engagement metrics)...")
     
-    # Step 1: Scrape Hacker News
-    urls = scrape_hackernews_pages(num_pages, verbose)
-    print(f"\n[OK] Found {len(urls)} URLs from Hacker News")
+    entries = scrape_hackernews_pages(num_pages, verbose)
+    print(f"\n[OK] Found {len(entries)} items from Hacker News")
     
-    if not urls:
-        print("No URLs found. Exiting.")
+    if not entries:
+        print("No items found. Exiting.")
         return
     
-    # Step 2: Scrape and categorize articles
-    print("\nStep 2: Scraping articles and categorizing...")
-    filtered_articles = scrape_and_categorize_articles(urls, delay, verbose)
+    # Pre-filter: time window (last N hours) + engagement thresholds
+    print(f"\nStep 2: Pre-filtering (last {hours_window}h, min_points={min_points}, min_comments={min_comments})...")
+    entries = apply_prefilter(entries, hours_window=hours_window, min_points=min_points, min_comments=min_comments, verbose=verbose)
+    print(f"[OK] {len(entries)} items pass pre-filter")
     
-    print(f"\n[OK] Found {len(filtered_articles)} articles matching LLM/AI or Programming/Software")
+    if not entries:
+        print("No items pass pre-filter. Exiting.")
+        return
+    
+    # Step 3: Scrape full content and apply keyword/category filter (LLM/AI only)
+    print("\nStep 3: Scraping articles and keyword/category filtering...")
+    filtered_articles = scrape_and_categorize_articles(entries, delay, verbose)
+    
+    print(f"\n[OK] Found {len(filtered_articles)} articles matching LLM/AI category")
     
     if not filtered_articles:
         print("No matching articles found.")
         return
     
-    # Step 3: Save filtered articles
-    print("\nStep 3: Saving filtered articles...")
+    # Step 4: Save filtered articles
+    print("\nStep 4: Saving filtered articles...")
     output_path = save_filtered_articles(filtered_articles, output_file)
 
-    # Step 4: Persist into the items table
-    print("\nStep 4: Writing articles to database (items table)...")
+    # Step 5: Persist into the items table
+    print("\nStep 5: Writing articles to database (items table)...")
     try:
         inserted = save_articles_to_db(filtered_articles)
         print(f"[OK] Inserted {inserted} rows into items table")
@@ -463,10 +556,16 @@ if __name__ == '__main__':
     import argparse
     
     parser = argparse.ArgumentParser(description='Hacker News Pipeline: Scrape, categorize, filter, and evaluate articles')
-    parser.add_argument('--pages', type=int, default=1, help='Number of Hacker News pages to scrape (max 20)')
+    parser.add_argument('--pages', type=int, default=3, help='Number of Hacker News pages to scrape (max 20, default: 3)')
     parser.add_argument('--delay', type=float, default=1, help='Delay between article requests (seconds)')
     parser.add_argument('--output', type=str, default='HackerNews/llm_programming_articles.json',
                        help='Output file path')
+    parser.add_argument('--hours-window', type=int, default=DEFAULT_HOURS_WINDOW,
+                       help='Pre-filter: only items from last N hours (default: 24)')
+    parser.add_argument('--min-points', type=int, default=DEFAULT_MIN_POINTS,
+                       help='Pre-filter: minimum HN points (default: 1)')
+    parser.add_argument('--min-comments', type=int, default=DEFAULT_MIN_COMMENTS,
+                       help='Pre-filter: minimum comment count (default: 0)')
     parser.add_argument('--quiet', action='store_true', help='Reduce verbose output')
     parser.add_argument('--evaluate', action='store_true', help='Run evaluation pipeline after ingestion')
     parser.add_argument('--eval-only', action='store_true', help='Only run evaluation, skip ingestion')
@@ -491,7 +590,10 @@ if __name__ == '__main__':
             num_pages=min(args.pages, 20),
             delay=args.delay,
             verbose=not args.quiet,
-            output_file=args.output
+            output_file=args.output,
+            hours_window=args.hours_window,
+            min_points=args.min_points,
+            min_comments=args.min_comments,
         )
         
         # Optionally run evaluation after ingestion

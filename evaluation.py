@@ -5,6 +5,7 @@ import re
 import sqlite3
 import time
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
 
@@ -128,30 +129,44 @@ def get_items_for_evaluation(db_path='mydb.db', hours=24):
     """Get items that need evaluation.
     
     Criteria:
-    - Published within last 24 hours (or specified hours)
-    - Status is 'INGESTED' or 'PREFILTERED' (passed keyword/time filters)
+    - Published within last `hours` (default 24). Use hours=0 or None to skip time filter (all unevaluated).
+    - Status is 'INGESTED' or 'PREFILTERED'
     - Not already evaluated (no entry in evaluations table for GENAI_NEWS persona)
     """
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
-        
-        # Calculate cutoff time
-        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
-        cutoff_str = cutoff_time.strftime('%Y-%m-%d %H:%M:%S')
-        
-        # Query items that meet criteria
-        query = """
+        use_time_filter = hours is not None and hours > 0
+        if use_time_filter:
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+            cutoff_str = cutoff_time.strftime('%Y-%m-%d %H:%M:%S')
+
+        # published_at can be: NULL, ISO 8601 text (e.g. ...T...Z or ...+00:00), or Unix timestamp (integer).
+        time_cond = """
+            (
+            i.published_at IS NULL
+            OR (
+                typeof(i.published_at) IN ('integer', 'real')
+                AND datetime(cast(i.published_at AS INTEGER), 'unixepoch') >= datetime(?)
+            )
+            OR (
+                typeof(i.published_at) = 'text'
+                AND datetime(
+                    replace(replace(replace(trim(i.published_at), 'T', ' '), 'Z', ''), '+00:00', '')
+                ) >= datetime(?)
+            )
+            )
+        """ if use_time_filter else "1"
+        query = f"""
         SELECT i.id, i.title, i.content, i.url, i.published_at, i.source, i.status
         FROM items i
         LEFT JOIN evaluations e ON i.id = e.item_id AND e.persona = 'GENAI_NEWS'
-        WHERE (i.published_at IS NULL OR datetime(i.published_at) >= datetime(?))
+        WHERE {time_cond}
           AND i.status IN ('INGESTED', 'PREFILTERED')
           AND e.id IS NULL
         ORDER BY i.published_at DESC NULLS LAST, i.ingestion_time DESC
         """
-        
-        cur.execute(query, (cutoff_str,))
+        cur.execute(query, (cutoff_str, cutoff_str) if use_time_filter else ())
         rows = cur.fetchall()
         
         items = []
@@ -165,14 +180,15 @@ def get_items_for_evaluation(db_path='mydb.db', hours=24):
                 'source': row[5],
                 'status': row[6]
             })
-        
         return items
     finally:
         conn.close()
 
 
-def save_evaluation(item_id, evaluation_result, persona='GENAI_NEWS', db_path='mydb.db'):
-    """Save evaluation result to the evaluations table."""
+def save_evaluation(item_id, evaluation_result, persona='GENAI_NEWS', db_path='mydb.db', evaluation_type='FULL'):
+    """Save evaluation result to the evaluations table.
+    evaluation_type: 'FULL' (full content), 'TFIDF', 'TEXTRANK', or other.
+    """
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
@@ -180,9 +196,9 @@ def save_evaluation(item_id, evaluation_result, persona='GENAI_NEWS', db_path='m
         cur.execute("""
             INSERT OR REPLACE INTO evaluations (
                 item_id, persona, decision, relevance_score,
-                topic, why_it_matters, target_audience, llm_model
+                topic, why_it_matters, target_audience, llm_model, evaluation_type
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             item_id,
             persona,
@@ -191,7 +207,8 @@ def save_evaluation(item_id, evaluation_result, persona='GENAI_NEWS', db_path='m
             evaluation_result['topic'],
             evaluation_result['why_it_matters'],
             evaluation_result['target_audience'],
-            evaluation_result['llm_model']
+            evaluation_result['llm_model'],
+            evaluation_type,
         ))
         
         # Update item status to EVALUATED
@@ -207,8 +224,24 @@ def save_evaluation(item_id, evaluation_result, persona='GENAI_NEWS', db_path='m
         conn.close()
 
 
+def _evaluate_one_item(item, ollama_base_url, model, timeout, db_path):
+    """Evaluate a single item (for use with ThreadPoolExecutor). Returns (item_id, evaluation, error)."""
+    try:
+        evaluation = evaluate_with_gemma3(
+            title=item['title'],
+            content=item['content'] or '',
+            url=item['url'] or '',
+            ollama_base_url=ollama_base_url,
+            model=model,
+            timeout=timeout
+        )
+        return (item['id'], evaluation, None)
+    except Exception as e:
+        return (item['id'], None, e)
+
+
 def run_evaluation_pipeline(db_path='mydb.db', ollama_base_url='http://localhost:11434', 
-                           model='gemma3:12b', hours=24, verbose=True, timeout=180):
+                           model='gemma3:12b', hours=24, verbose=True, timeout=180, max_workers=3):
     """Run the evaluation pipeline on items that need evaluation.
     
     Filters items by:
@@ -216,13 +249,12 @@ def run_evaluation_pipeline(db_path='mydb.db', ollama_base_url='http://localhost
     - Status is INGESTED or PREFILTERED
     - Not already evaluated
     
-    Evaluates each item with Gemma3 and saves results to evaluations table.
+    Evaluates up to max_workers items concurrently with Gemma3 and saves results.
     """
     print("=" * 60)
     print("EVALUATION PIPELINE")
     print("=" * 60)
     
-    # Step 1: Get items that need evaluation
     print(f"\nStep 1: Fetching items for evaluation (published in last {hours} hours)...")
     items = get_items_for_evaluation(db_path, hours)
     
@@ -230,47 +262,47 @@ def run_evaluation_pipeline(db_path='mydb.db', ollama_base_url='http://localhost
         print("[OK] No items found that need evaluation.")
         return 0
     
-    print(f"[OK] Found {len(items)} items to evaluate")
+    print(f"[OK] Found {len(items)} items to evaluate (up to {max_workers} concurrent)")
     
-    # Step 2: Evaluate each item
     print(f"\nStep 2: Evaluating items with Gemma3 ({model})...")
     evaluated_count = 0
     error_count = 0
     
-    for i, item in enumerate(items, 1):
-        if verbose:
-            print(f"[{i}/{len(items)}] Evaluating: {item['title'][:60]}...")
-        
-        try:
-            # Evaluate with Gemma3
-            evaluation = evaluate_with_gemma3(
-                title=item['title'],
-                content=item['content'] or '',
-                url=item['url'] or '',
-                ollama_base_url=ollama_base_url,
-                model=model,
-                timeout=timeout
-            )
-            
-            # Save evaluation
-            if save_evaluation(item['id'], evaluation, persona='GENAI_NEWS', db_path=db_path):
-                evaluated_count += 1
-                if verbose:
-                    decision = evaluation['decision']
-                    score = evaluation['relevance_score']
-                    print(f"    [{decision}] Relevance: {score:.2f} | Topic: {evaluation['topic']}")
-            else:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_item = {
+            executor.submit(
+                _evaluate_one_item,
+                item,
+                ollama_base_url,
+                model,
+                timeout,
+                db_path,
+            ): item
+            for item in items
+        }
+        for future in as_completed(future_to_item):
+            item = future_to_item[future]
+            try:
+                item_id, evaluation, err = future.result()
+                if err:
+                    error_count += 1
+                    if verbose:
+                        print(f"    [ERROR] {item['title'][:50]}...: {err}")
+                    continue
+                if save_evaluation(item_id, evaluation, persona='GENAI_NEWS', db_path=db_path, evaluation_type='FULL'):
+                    evaluated_count += 1
+                    if verbose:
+                        decision = evaluation['decision']
+                        score = evaluation['relevance_score']
+                        print(f"    [{decision}] Relevance: {score:.2f} | Topic: {evaluation['topic']} | {item['title'][:45]}...")
+                else:
+                    error_count += 1
+                    if verbose:
+                        print(f"    [ERROR] Failed to save evaluation for item {item_id}")
+            except Exception as e:
                 error_count += 1
                 if verbose:
-                    print(f"    [ERROR] Failed to save evaluation")
-            
-            # Small delay to avoid overwhelming the API
-            time.sleep(0.5)
-            
-        except Exception as e:
-            error_count += 1
-            if verbose:
-                print(f"    [ERROR] {str(e)}")
+                    print(f"    [ERROR] {item['title'][:50]}...: {e}")
     
     print(f"\n[OK] Evaluation complete!")
     print(f"[OK] Evaluated: {evaluated_count} items")
@@ -287,8 +319,9 @@ if __name__ == '__main__':
     parser.add_argument('--db', type=str, default='mydb.db', help='Database file path')
     parser.add_argument('--ollama-url', type=str, default='http://localhost:11434', help='Ollama base URL')
     parser.add_argument('--model', type=str, default='gemma3:12b', help='Ollama model name (default: gemma3:12b)')
-    parser.add_argument('--hours', type=int, default=24, help='Hours to look back for recent items (default: 24)')
+    parser.add_argument('--hours', type=int, default=24, help='Hours to look back (default: 24). Use 0 for no time limit (all unevaluated items).')
     parser.add_argument('--timeout', type=int, default=180, help='Request timeout in seconds (default: 180)')
+    parser.add_argument('--workers', type=int, default=3, help='Number of concurrent evaluations (default: 3)')
     parser.add_argument('--quiet', action='store_true', help='Reduce verbose output')
     
     args = parser.parse_args()
@@ -299,5 +332,6 @@ if __name__ == '__main__':
         model=args.model,
         hours=args.hours,
         verbose=not args.quiet,
-        timeout=args.timeout
+        timeout=args.timeout,
+        max_workers=args.workers
     )

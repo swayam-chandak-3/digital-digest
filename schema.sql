@@ -17,6 +17,7 @@
 --     -- Content
 --     title TEXT NOT NULL,
 --     description TEXT,                        -- short summary if available
+--     summary TEXT,                            -- generated or stored summary
 --     content TEXT,                            -- full text if fetched
 --     url TEXT,
 
@@ -60,6 +61,7 @@
 --     -- Metadata
 --     llm_model TEXT,
 --     evaluated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+--     evaluation_type TEXT,                    -- FULL | TFIDF | TEXTRANK
 
 --     FOREIGN KEY (item_id) REFERENCES items(id),
 --     UNIQUE(item_id, persona)
@@ -75,10 +77,45 @@
 --     UNIQUE(item_id, persona)
 -- );
 
+-- Deduplication (FAISS + topic similarity): one canonical item per cluster
+-- CREATE TABLE dedup_clusters (
+--     id INTEGER PRIMARY KEY AUTOINCREMENT,
+--     canonical_item_id INTEGER NOT NULL,
+--     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+--     FOREIGN KEY (canonical_item_id) REFERENCES items(id)
+-- );
+-- CREATE TABLE dedup_item_cluster (
+--     item_id INTEGER NOT NULL,
+--     cluster_id INTEGER NOT NULL,
+--     is_canonical INTEGER NOT NULL DEFAULT 0,
+--     PRIMARY KEY (item_id),
+--     FOREIGN KEY (item_id) REFERENCES items(id),
+--     FOREIGN KEY (cluster_id) REFERENCES dedup_clusters(id)
+-- );
 
+-- Summarization output: 3-5 line technical summary, why_it_matters, target_audience (source: LLM or TEXTRANK)
+-- CREATE TABLE item_summaries (
+--     id INTEGER PRIMARY KEY AUTOINCREMENT,
+--     item_id INTEGER NOT NULL,
+--     technical_summary TEXT NOT NULL,
+--     why_it_matters TEXT,
+--     target_audience TEXT,
+--     source TEXT NOT NULL,
+--     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+--     FOREIGN KEY (item_id) REFERENCES items(id),
+--     UNIQUE(item_id, source)
+-- );
 
-UPDATE items
-SET status = 'INGESTED';
+-- delete from item_summaries;
+-- UPDATE items
+-- SET status = 'INGESTED';
 
-DELETE FROM evaluations;
+-- Add summary column to items if it does not exist (run once on existing DBs):
+-- ALTER TABLE items ADD COLUMN summary TEXT;
+
+-- Add evaluation_type column to evaluations (run once on existing DBs):
+-- ALTER TABLE evaluations ADD COLUMN evaluation_type TEXT;
+
+-- DELETE FROM evaluations;
+-- delete from items;
 
