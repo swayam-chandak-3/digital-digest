@@ -21,7 +21,7 @@ except ImportError:
     pass
 
 # Import digest entries from summarization (TextRank or LLM)
-from summarization_textrank import get_digest_entries, SUMMARY_SOURCE
+from ..tools.summarization_textrank import get_digest_entries, SUMMARY_SOURCE
 
 DEFAULT_SOURCE = SUMMARY_SOURCE
 

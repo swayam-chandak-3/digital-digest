@@ -107,8 +107,8 @@
 -- );
 
 -- delete from item_summaries;
--- UPDATE items
--- SET status = 'INGESTED';
+UPDATE items
+SET status = 'INGESTED';
 
 -- Add summary column to items if it does not exist (run once on existing DBs):
 -- ALTER TABLE items ADD COLUMN summary TEXT;
