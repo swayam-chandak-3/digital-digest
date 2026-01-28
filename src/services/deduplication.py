@@ -1,12 +1,15 @@
 """
 Deduplication: vector similarity (FAISS) + topic/content similarity.
-Uses evaluations table (KEEP items) to build embeddings from title + topic + why_it_matters,
+Uses evaluations table (KEEP items) to build embeddings from title + topic + why_it_matters+content,
 clusters by similarity, keeps a single canonical entry per unique topic/idea.
 """
-
+import os
 import sqlite3
 import numpy as np
-from datetime import datetime, timezone
+# from datetime import datetime, timezone
+from dotenv import load_dotenv
+load_dotenv()
+DB_PATH=os.getenv("DB_PATH")
 
 
 def _ensure_dedup_tables(conn):
@@ -69,12 +72,12 @@ def _text_for_embedding(item):
     why = (item.get("why_it_matters") or "").strip()
     summary = (item.get("summary") or "").strip()
     content = (item.get("content") or "").strip()
-    # Prefer semantic fields (topic, why_it_matters) and title; add summary/content head for extra signal
+    # Use semantic fields (topic, why_it_matters) and title; add summary and content for comprehensive signal
     parts = [title, topic, why]
     if summary:
-        parts.append(summary[:1500])
-    elif content:
-        parts.append(content[:1500])
+        parts.append(summary[:2000])
+    if content:
+        parts.append(content[:3000])
     return " ".join(p for p in parts if p).strip() or title or "unknown"
 
 
@@ -245,7 +248,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Deduplicate KEEP items from evaluations using FAISS + topic similarity"
     )
-    parser.add_argument("--db", type=str, default="mydb.db", help="Database path")
+    parser.add_argument("--db", type=str, default=DB_PATH, help="Database path")
     parser.add_argument("--persona", type=str, default="GENAI_NEWS", help="Evaluation persona")
     parser.add_argument(
         "--threshold",

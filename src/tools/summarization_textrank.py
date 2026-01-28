@@ -4,10 +4,14 @@ evaluations (topic, why_it_matters, target_audience). Formats output as news-art
 digest entries (headline, lead, why it matters, audience) for daily digest. No LLM.
 """
 
+import os
+from pathlib import Path
 import re
 import sqlite3
 from datetime import datetime, timezone
-
+from dotenv import load_dotenv
+load_dotenv()
+DB_PATH=Path(os.getenv("DB_PATH"))
 SUMMARY_SOURCE = "TEXTRANK"
 
 
@@ -36,7 +40,7 @@ def _ensure_item_summaries_table(conn):
     conn.commit()
 
 
-def get_items_with_textrank_and_evaluation(db_path="mydb.db", persona="GENAI_NEWS", use_canonical_only=False):
+def get_items_with_textrank_and_evaluation(db_path, persona="GENAI_NEWS", use_canonical_only=False):
     """
     Get items that have non-empty items.summary (TextRank) and an evaluation (KEEP).
     Returns list of dicts: id, title, summary, url, topic, why_it_matters, target_audience.
@@ -155,7 +159,7 @@ def save_item_summary(
 
 
 def run_summarization_textrank_pipeline(
-    db_path="mydb.db",
+    db_path,
     persona="GENAI_NEWS",
     use_canonical_only=False,
     max_summary_sentences=5,
@@ -217,52 +221,66 @@ def run_summarization_textrank_pipeline(
     return saved
 
 
-def get_digest_entries(db_path="mydb.db", source=SUMMARY_SOURCE):
+def get_digest_entries(db_path, source="TEXTRANK"):
     """
-    Load item_summaries as news-article-style entries for the daily digest.
-    Returns list of dicts with keys: headline, lead, why_it_matters, target_audience, topic, url, item_id.
-    Use for rendering or sending the digest (e.g. email, report).
+    Load digest entries directly from items + evaluations.
+    Returns list of dicts with keys:
+    headline, lead, why_it_matters, target_audience, topic, url,
+    item_id, likes, comments
     """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
         cur = conn.cursor()
-        try:
-            cur.execute("""
-                SELECT item_id, technical_summary, why_it_matters, target_audience,
-                       COALESCE(title, '') AS title, COALESCE(topic, '') AS topic, COALESCE(url, '') AS url
-                FROM item_summaries
-                WHERE source = ?
-                ORDER BY item_id
-            """, (source,))
-        except sqlite3.OperationalError:
-            cur.execute("""
-                SELECT item_id, technical_summary, why_it_matters, target_audience
-                FROM item_summaries
-                WHERE source = ?
-                ORDER BY item_id
-            """, (source,))
+
+        cur.execute(
+            """
+            SELECT
+                i.id AS item_id,
+                i.title AS headline,
+                i.summary AS lead,
+                e.why_it_matters,
+                e.target_audience,
+                e.topic,
+                i.url,
+                COALESCE(i.likes, 0) AS likes,
+                COALESCE(i.comments, 0) AS comments
+            FROM items i
+            JOIN evaluations e
+              ON e.item_id = i.id
+            WHERE e.decision = 'KEEP'
+              AND e.evaluation_type = ?
+            ORDER BY
+                i.published_at DESC,
+                i.ingestion_time DESC
+            """,
+            (source,),
+        )
+
         rows = cur.fetchall()
+
         return [
             {
                 "item_id": r["item_id"],
-                "headline": (r["title"] if "title" in r.keys() else "") or "(No title)",
-                "lead": r["technical_summary"] or "",
+                "headline": r["headline"] or "(No title)",
+                "lead": r["lead"] or "",
                 "why_it_matters": r["why_it_matters"] or "",
                 "target_audience": r["target_audience"] or "developer",
-                "topic": (r["topic"] if "topic" in r.keys() else "") or "",
-                "url": (r["url"] if "url" in r.keys() else "") or "",
+                "topic": r["topic"] or "",
+                "url": r["url"] or "",
+                "likes": r["likes"],
+                "comments": r["comments"],
             }
             for r in rows
         ]
+
     finally:
         conn.close()
-
 
 if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser(description="Summarize using TextRank summary + evaluation (why it matters, audience)")
-    p.add_argument("--db", default="mydb.db", help="Database path")
+    p.add_argument("--db", default=DB_PATH, help="Database path")
     p.add_argument("--canonical-only", action="store_true", help="Only canonical (dedup) items")
     p.add_argument("--max-sentences", type=int, default=5, help="Max sentences in technical summary (default 5)")
     p.add_argument("--deliver", action="store_true", help="Run delivery (email/Telegram/file) after summarization")

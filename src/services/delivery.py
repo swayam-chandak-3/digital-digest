@@ -8,6 +8,7 @@ Fallback: File output (JSON + Markdown) is always generated.
 
 import os
 import json
+from pathlib import Path
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -17,6 +18,7 @@ from urllib.parse import quote
 try:
     from dotenv import load_dotenv
     load_dotenv()
+    DB_PATH=Path(os.getenv("DB_PATH"))
 except ImportError:
     pass
 
@@ -73,6 +75,8 @@ def build_digest_html(entries, title="Daily Digest"):
         why = _escape_html(e.get("why_it_matters") or "")
         audience = _escape_html(e.get("target_audience") or "developer")
         topic = _escape_html(e.get("topic") or "")
+        likes = e.get("likes", 0)
+        comments = e.get("comments", 0)
         url = (e.get("url") or "").strip()
         url_attr = f' href="{_escape_attr(url)}"' if url else ""
         link_tag = f'<a{url_attr}>{headline}</a>' if url else headline
@@ -81,6 +85,7 @@ def build_digest_html(entries, title="Daily Digest"):
         if topic:
             parts.append(f" <em>[{topic}]</em>")
         parts.append(f" &mdash; {audience}")
+        parts.append(f" | 👍 {likes} | 💬 {comments}")
         if lead:
             parts.append(f"<p>{lead}</p>")
         if why:
@@ -105,50 +110,147 @@ def _escape_attr(s):
 
 def _escape_telegram_markdown(s):
     """
-    Escape characters that break Telegram's legacy Markdown parser (_, *, [, ], (, ), `).
-    Use for any user-generated text in the digest when sending to Telegram.
+    Escape text for Telegram MarkdownV2.
+    All special characters must be escaped with backslash.
     """
     if s is None:
         return ""
     s = str(s)
-    # Backslash first so we don't double-escape
-    for char in ("\\", "_", "*", "[", "]", "(", ")", "`"):
-        s = s.replace(char, "\\" + char)
+    # Characters that need escaping in MarkdownV2
+    escape_chars = r"_*[]()~`>#+-=|{}.!"
+    for ch in escape_chars:
+        s = s.replace(ch, "\\" + ch)
+    # Backslash must be escaped last (or handle separately)
+    s = s.replace("\\\\", "\\")  # Avoid double-escaping
     return s
 
 
-def build_digest_markdown(entries, title="Daily Digest", escape_for_telegram=False):
-    """Build Markdown body for Telegram (or file). When escape_for_telegram=True, escapes special chars for Telegram."""
-    if not entries:
-        return f"# {title}\n\nNo items in this digest."
-
+def _build_entry_markdown(entry, escape_for_telegram=True):
+    """
+    Build markdown for a single entry.
+    Returns the formatted entry text.
+    """
     def esc(t):
         return _escape_telegram_markdown(t) if escape_for_telegram else (t or "")
-
-    title_safe = esc(title) if escape_for_telegram else title
-    lines = [f"# {title_safe}", ""]
-    for i, e in enumerate(entries, 1):
-        headline = e.get("headline") or "(No title)"
-        url = (e.get("url") or "").strip()
-        lead = e.get("lead") or ""
-        why = e.get("why_it_matters") or ""
-        audience = e.get("target_audience") or "developer"
-        topic = e.get("topic") or ""
+    
+    headline = entry.get("headline") or "(No title)"
+    url = (entry.get("url") or "").strip()
+    lead = entry.get("lead") or ""
+    why = entry.get("why_it_matters") or ""
+    audience = entry.get("target_audience") or "developer"
+    topic = entry.get("topic") or ""
+    likes = entry.get("likes", 0)
+    comments = entry.get("comments", 0)
+    
+    entry_lines = []
+    
+    if escape_for_telegram:
+        headline_esc = esc(headline)
+        lead_esc = esc(lead)
+        why_esc = esc(why)
+        audience_esc = esc(audience)
+        topic_esc = esc(topic)
+    else:
+        headline_esc = headline
+        lead_esc = lead
+        why_esc = why
+        audience_esc = audience
+        topic_esc = topic
+    
+    # Build the link
+    if url:
+        entry_lines.append(f"• [{headline_esc}]({url})")
+    else:
+        entry_lines.append(f"• *{headline_esc}*")
+    
+    # Topic and audience
+    if topic_esc:
+        entry_lines.append(f"   _{topic_esc}_ — {audience_esc}")
+    else:
+        entry_lines.append(f"   {audience_esc}")
+    
+    # Engagement
+    if escape_for_telegram:
+        entry_lines.append(f"   👍 {likes} \\| 💬 {comments}")
+    else:
+        entry_lines.append(f"   👍 {likes} \\| 💬 {comments}")
+    
+    # Add lead
+    if lead_esc:
+        entry_lines.append(f"   {lead_esc}")
+    
+    # Add why it matters
+    if why_esc:
         if escape_for_telegram:
-            headline, url, lead, why, audience, topic = esc(headline), esc(url), esc(lead), esc(why), esc(audience), esc(topic)
-        if url:
-            lines.append(f"{i}. [{headline}]({url})")
+            entry_lines.append(f"*Why it matters:* {why_esc}")
         else:
-            lines.append(f"{i}. **{headline}**")
-        if topic:
-            lines.append(f"   *{topic}* — {audience}")
-        else:
-            lines.append(f"   {audience}")
-        if lead:
-            lines.append(f"   {lead}")
-        if why:
-            lines.append(f"   _Why it matters:_ {why}")
+            entry_lines.append(f"*Why it matters*: {why_esc}")
+    
+    return "\n".join(entry_lines)
+
+
+def build_digest_messages(entries, title="Daily Digest", escape_for_telegram=True, max_message_length=4000):
+    """
+    Build multiple Telegram messages ensuring each entry stays intact within a message.
+    Returns list of message texts.
+    If an entry doesn't fit in current message, it goes to the next message.
+    All entries are guaranteed to be included.
+    """
+    if not entries:
+        no_items = "No items in this digest\\." if escape_for_telegram else "No items in this digest."
+        title_safe = _escape_telegram_markdown(title) if escape_for_telegram else title
+        return [f"*{title_safe}*\n\n{no_items}"]
+    
+    messages = []
+    title_safe = _escape_telegram_markdown(title) if escape_for_telegram else title
+    header = f"*{title_safe}*\n\n"
+    
+    current_message = header
+    current_length = len(header)
+    buffer_for_safety = 150  # Safety buffer for Telegram limits
+    
+    for i, entry in enumerate(entries, 1):
+        # Build the entry
+        entry_text = _build_entry_markdown(entry, escape_for_telegram)
+        entry_length = len(entry_text) + 2  # +2 for newlines
+        entry_with_separator = entry_text + "\n\n"
+        
+        # Check if entry fits in current message
+        if current_length + entry_length + buffer_for_safety >= max_message_length:
+            # Current message is full, save it and start a new one
+            messages.append(current_message.strip())
+            current_message = header
+            current_length = len(header)
+        
+        # Add entry to current message
+        current_message += entry_with_separator
+        current_length += len(entry_with_separator)
+    
+    # Add the last message
+    if current_message.strip() != header.strip():
+        messages.append(current_message.strip())
+    
+    return messages
+
+
+def build_digest_markdown(entries, title="Daily Digest", escape_for_telegram=True, max_message_length=999999):
+    """
+    Build full Markdown body for file output (no message limits).
+    When escape_for_telegram=True, escapes special chars for Telegram MarkdownV2.
+    """
+    if not entries:
+        no_items = "No items in this digest\\." if escape_for_telegram else "No items in this digest."
+        title_safe = _escape_telegram_markdown(title) if escape_for_telegram else title
+        return f"*{title_safe}*\n\n{no_items}"
+
+    title_safe = _escape_telegram_markdown(title) if escape_for_telegram else title
+    lines = [f"*{title_safe}*", ""]
+    
+    for i, e in enumerate(entries, 1):
+        entry_text = _build_entry_markdown(e, escape_for_telegram)
+        lines.append(entry_text)
         lines.append("")
+    
     return "\n".join(lines).strip()
 
 
@@ -174,7 +276,8 @@ def write_fallback_files(entries, output_dir="output", title="Daily Digest", sou
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
-    md_content = build_digest_markdown(entries, title=title)
+    # Write markdown without Telegram escaping for file output (full content)
+    md_content = build_digest_markdown(entries, title=title, escape_for_telegram=False, max_message_length=999999)
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(md_content)
 
@@ -216,57 +319,45 @@ def send_email(html_content, subject, to_address, config, verbose=True):
         return False
 
 
-def _chunk_text(text, max_len=4090):
-    """Split text into chunks under max_len, breaking at newline or space."""
-    chunks = []
-    rest = text
-    while rest:
-        if len(rest) <= max_len:
-            chunks.append(rest)
-            break
-        idx = rest.rfind("\n", 0, max_len)
-        if idx <= 0:
-            idx = rest.rfind(" ", 0, max_len)
-        if idx <= 0:
-            idx = max_len
-        chunks.append(rest[:idx])
-        rest = rest[idx:].lstrip()
-    return chunks
-
-
-async def _send_telegram_async(markdown_content, chat_id, bot_token, verbose=True):
-    """Send message via python-telegram-bot (Bot API). Uses Markdown parse_mode."""
+async def _send_telegram_async(messages, chat_id, bot_token, verbose=True):
+    """Send multiple messages via python-telegram-bot (Bot API). Uses MarkdownV2 parse_mode."""
     from telegram import Bot
 
     bot = Bot(token=bot_token.strip())
     chat_id_str = str(chat_id).strip()
-    chunks = _chunk_text(markdown_content)
 
-    for i, text in enumerate(chunks):
+    # Send each message
+    for i, message_text in enumerate(messages, 1):
         await bot.send_message(
             chat_id=chat_id_str,
-            text=text,
-            parse_mode="Markdown",
+            text=message_text,
+            parse_mode="MarkdownV2",
             disable_web_page_preview=True,
         )
-        if verbose and len(chunks) > 1:
-            print(f"[Delivery] Telegram part {i + 1}/{len(chunks)} sent")
-    if verbose:
-        print("[Delivery] Telegram message(s) sent.")
+        if verbose and len(messages) > 1:
+            print(f"[Delivery] Telegram message {i}/{len(messages)} sent ({len(message_text)} chars)")
+        elif verbose:
+            print(f"[Delivery] Telegram message sent ({len(message_text)} chars)")
 
 
-def send_telegram(markdown_content, chat_id, bot_token, verbose=True):
+def send_telegram(messages, chat_id, bot_token, verbose=True):
     """
-    Send message via Telegram Bot API (python-telegram-bot).
-    Uses Markdown parse_mode. Long content is split into chunks under 4096 chars.
+    Send messages via Telegram Bot API (python-telegram-bot).
+    Uses MarkdownV2 parse_mode. Sends multiple messages if needed, ensuring no entry is split.
+    messages: list of message texts or single string
     """
     if not bot_token or not chat_id or not str(chat_id).strip():
         if verbose:
             print("[Delivery] Skipping Telegram: no TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID set.")
         return False
+    
+    # Convert single string to list
+    if isinstance(messages, str):
+        messages = [messages]
+    
     try:
         import asyncio
-        asyncio.run(_send_telegram_async(markdown_content, chat_id, bot_token, verbose=verbose))
+        asyncio.run(_send_telegram_async(messages, chat_id, bot_token, verbose=verbose))
         return True
     except Exception as e:
         if verbose:
@@ -284,19 +375,23 @@ def run_delivery(
     """
     Load digest entries, write JSON + Markdown files (always), then send via
     channels configured for this persona (email, telegram).
+    Entries are sorted by total engagement (likes + comments) in descending order.
     """
     source = source or DEFAULT_SOURCE
     try:
-        entries = get_digest_entries(db_path=db_path, source=source)
+        entries = get_digest_entries(db_path=DB_PATH, source=source)
     except Exception as e:
         if verbose:
             print(f"[Delivery] Failed to load digest entries: {e}")
         entries = []
 
+    # Sort entries by total engagement (likes + comments) in descending order
+    entries.sort(key=lambda e: e.get("likes", 0) + e.get("comments", 0), reverse=True)
+
     config = get_delivery_config(persona=persona)
     title = f"{config['digest_subject_prefix']} ({persona})"
 
-    # 1. Fallback: always write JSON + Markdown
+    # 1. Fallback: always write JSON + Markdown (full content)
     json_path, md_path = write_fallback_files(
         entries, output_dir=output_dir, title=title, source=source
     )
@@ -305,8 +400,7 @@ def run_delivery(
 
     channels = config["channels"]
     html = build_digest_html(entries, title=title)
-    md = build_digest_markdown(entries, title=title)
-    md_telegram = build_digest_markdown(entries, title=title, escape_for_telegram=True)
+    md_telegram_messages = build_digest_messages(entries, title=title, escape_for_telegram=True)
     subject = f"{title} — {len(entries)} items"
 
     # 2. Email (HTML)
@@ -319,10 +413,10 @@ def run_delivery(
             verbose=verbose,
         )
 
-    # 3. Telegram (Markdown, escaped so special chars don't break the parser)
+    # 3. Telegram (Multiple messages if needed, ensuring entries stay intact)
     if "telegram" in channels:
         send_telegram(
-            md_telegram,
+            md_telegram_messages,
             chat_id=config["telegram_chat_id"],
             bot_token=config["telegram_bot_token"],
             verbose=verbose,

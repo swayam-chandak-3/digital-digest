@@ -24,6 +24,9 @@
 --     -- Timing & engagement
 --     published_at DATETIME,
 --     engagement_score REAL,                   -- points, upvotes, comments-derived
+--     likes INTEGER DEFAULT 0,                 -- number of likes
+--     comments INTEGER DEFAULT 0,              -- number of comments
+--     views INTEGER DEFAULT 0,                 -- number of views
 --     raw_metadata JSON,                       -- source-specific payload
 
 --     -- Pipeline control
@@ -77,7 +80,7 @@
 --     UNIQUE(item_id, persona)
 -- );
 
--- Deduplication (FAISS + topic similarity): one canonical item per cluster
+-- -- Deduplication (FAISS + topic similarity): one canonical item per cluster
 -- CREATE TABLE dedup_clusters (
 --     id INTEGER PRIMARY KEY AUTOINCREMENT,
 --     canonical_item_id INTEGER NOT NULL,
@@ -93,7 +96,7 @@
 --     FOREIGN KEY (cluster_id) REFERENCES dedup_clusters(id)
 -- );
 
--- Summarization output: 3-5 line technical summary, why_it_matters, target_audience (source: LLM or TEXTRANK)
+-- -- Summarization output: 3-5 line technical summary, why_it_matters, target_audience (source: LLM or TEXTRANK)
 -- CREATE TABLE item_summaries (
 --     id INTEGER PRIMARY KEY AUTOINCREMENT,
 --     item_id INTEGER NOT NULL,
@@ -107,8 +110,14 @@
 -- );
 
 -- delete from item_summaries;
-UPDATE items
-SET status = 'INGESTED';
+-- delete from evaluations;
+-- delete from embeddings;
+-- delete from dedup_item_cluster;
+-- delete from dedup_clusters;
+-- delete from items;
+
+-- UPDATE items
+-- SET status = 'INGESTED';
 
 -- Add summary column to items if it does not exist (run once on existing DBs):
 -- ALTER TABLE items ADD COLUMN summary TEXT;
@@ -119,3 +128,6 @@ SET status = 'INGESTED';
 -- DELETE FROM evaluations;
 -- delete from items;
 
+-- alter table items add column likes INTEGER DEFAULT 0;
+--     alter table items add column comments INTEGER DEFAULT 0;
+--     alter table items add column views INTEGER DEFAULT 0;

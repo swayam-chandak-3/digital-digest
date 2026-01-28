@@ -17,11 +17,17 @@ import time
 import re
 import json
 import sqlite3
+from dotenv import load_dotenv
+load_dotenv()
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup, SoupStrainer
 from readability import Document
-from datetime import datetime, timezone
-from evaluation import run_evaluation_pipeline
+from datetime import datetime, timezone, timedelta
+from ..tools.helper import _evaluate_one_item, get_items_for_evaluation, save_evaluation
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+DB_PATH = Path(os.getenv('DB_PATH', 'mydb.db'))
 
 # Topic keywords for categorization
 TOPIC_KEYWORDS = {
@@ -329,7 +335,8 @@ def scrape_and_categorize_articles(entries, delay=1, verbose=False):
         title = result.get('title', 'No Title')
         text = result.get('text', '')
         author = result.get('author')
-        publish_datetime = result.get('publish_datetime')
+        publish_datetime = hn_time_ago_to_utc(entry.get('time_ago_str'))
+
         
         parsed = urlparse(url)
         domain = parsed.netloc.replace('www.', '')
@@ -369,6 +376,16 @@ def scrape_and_categorize_articles(entries, delay=1, verbose=False):
             time.sleep(delay)
     
     return filtered_articles
+
+
+def hn_time_ago_to_utc(time_ago_str):
+    """Convert HN 'X minutes/hours/days ago' to UTC ISO timestamp."""
+    hours_ago = _parse_time_ago_to_hours(time_ago_str)
+    if hours_ago is None:
+        return None
+    dt = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+    return dt.isoformat().replace('+00:00', 'Z')
+
 
 def save_filtered_articles(articles, output_file='HackerNews/llm_programming_articles.json'):
     """Save filtered articles to a JSON file.
@@ -422,13 +439,8 @@ def save_filtered_articles(articles, output_file='HackerNews/llm_programming_art
 
     return output_file
 
-
-def save_articles_to_db(articles, db_path='mydb.db'):
-    """Persist articles into the items table.
-
-    Any field not present in the JSON will be stored as NULL in the database.
-    Looks up source ID from the sources table and stores it in source_id.
-    """
+def save_articles_to_db(articles, db_path=DB_PATH):
+    """Persist articles into the items table, skipping duplicate titles."""
     if not articles:
         return 0
 
@@ -436,17 +448,34 @@ def save_articles_to_db(articles, db_path='mydb.db'):
     try:
         cur = conn.cursor()
 
+        # 1️⃣ Fetch existing titles once
+        cur.execute("SELECT title FROM items")
+        existing_titles = {row[0] for row in cur.fetchall() if row[0]}
+
         rows = []
+        skipped = 0
+
         for article in articles:
+            title = article.get('title')
+
+            # 2️⃣ Skip if title already exists
+            if title in existing_titles:
+                skipped += 1
+                continue
+
             source_name = article.get('source') or 'unknown'
             link = article.get('link')
-            title = article.get('title')
             content = article.get('content')
             published_at = article.get('publish_datetime')
-            engagement_score = article.get('engagement_score')  # points + 2*comments from HN
+            engagement_score = article.get('engagement_score')
+            likes = article.get('points', 0)  # Map points to likes
+            comments = article.get('num_comments', 0)  # Map num_comments to comments
 
-            source_name_lower = source_name.lower()
-            cur.execute("SELECT id FROM sources WHERE LOWER(source) = ?", (source_name_lower,))
+            # Resolve source_id
+            cur.execute(
+                "SELECT id FROM sources WHERE LOWER(source) = ?",
+                (source_name.lower(),)
+            )
             source_result = cur.fetchone()
             source_id = int(source_result[0]) if source_result else None
 
@@ -455,38 +484,50 @@ def save_articles_to_db(articles, db_path='mydb.db'):
                 source_id,
                 link,
                 title,
-                None,
-                article.get('summary'),  # summary (TEXT), NULL until generated
+                None,                        # description
+                article.get('summary'),     # summary (NULL for now)
                 content,
                 link,
                 published_at,
                 engagement_score,
+                likes,
+                comments,
                 json.dumps(article),
             )
-            rows.append(row)
 
-        cur.executemany(
-            """
-            INSERT INTO items (
-                source,
-                source_id,
-                source_url,
-                title,
-                description,
-                summary,
-                content,
-                url,
-                published_at,
-                engagement_score,
-                raw_metadata,
-                status
+            rows.append(row)
+            existing_titles.add(title)  # prevent duplicates in same run
+
+        if rows:
+            cur.executemany(
+                """
+                INSERT INTO items (
+                    source,
+                    source_id,
+                    source_url,
+                    title,
+                    description,
+                    summary,
+                    content,
+                    url,
+                    published_at,
+                    engagement_score,
+                    likes,
+                    comments,
+                    raw_metadata,
+                    status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PREFILTERED')
+                """,
+                rows,
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PREFILTERED')
-            """,
-            rows,
-        )
-        conn.commit()
+            conn.commit()
+
+        if skipped > 0:
+            print(f"[INFO] Skipped {skipped} duplicate titles")
+
         return len(rows)
+
     finally:
         conn.close()
 
@@ -552,6 +593,78 @@ def run_pipeline(num_pages=3, delay=1, verbose=True, output_file='HackerNews/llm
     
     return output_path
 
+
+def run_evaluation_pipeline(db_path=DB_PATH, ollama_base_url='http://localhost:11434', 
+                           model='gemma3:12b', hours=24, verbose=True, timeout=180, max_workers=3):
+    """Run the evaluation pipeline on items that need evaluation.
+    
+    Filters items by:
+    - Published in last 24 hours (or specified hours)
+    - Status is INGESTED or PREFILTERED
+    - Not already evaluated
+    
+    Evaluates up to max_workers items concurrently with Gemma3 and saves results.
+    """
+    print("=" * 60)
+    print("EVALUATION PIPELINE")
+    print("=" * 60)
+    
+    print(f"\nStep 1: Fetching items for evaluation (published in last {hours} hours)...")
+    items = get_items_for_evaluation(db_path, hours)
+    
+    if not items:
+        print("[OK] No items found that need evaluation.")
+        return 0
+    
+    print(f"[OK] Found {len(items)} items to evaluate (up to {max_workers} concurrent)")
+    
+    print(f"\nStep 2: Evaluating items with Gemma3 ({model})...")
+    evaluated_count = 0
+    error_count = 0
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_item = {
+            executor.submit(
+                _evaluate_one_item,
+                item,
+                ollama_base_url,
+                model,
+                timeout,
+                db_path,
+            ): item
+            for item in items
+        }
+        for future in as_completed(future_to_item):
+            item = future_to_item[future]
+            try:
+                item_id, evaluation, err = future.result()
+                if err:
+                    error_count += 1
+                    if verbose:
+                        print(f"    [ERROR] {item['title'][:50]}...: {err}")
+                    continue
+                if save_evaluation(item_id, evaluation, persona='GENAI_NEWS', db_path=db_path, evaluation_type='FULL'):
+                    evaluated_count += 1
+                    if verbose:
+                        decision = evaluation['decision']
+                        score = evaluation['relevance_score']
+                        print(f"    [{decision}] Relevance: {score:.2f} | Topic: {evaluation['topic']} | {item['title'][:45]}...")
+                else:
+                    error_count += 1
+                    if verbose:
+                        print(f"    [ERROR] Failed to save evaluation for item {item_id}")
+            except Exception as e:
+                error_count += 1
+                if verbose:
+                    print(f"    [ERROR] {item['title'][:50]}...: {e}")
+    
+    print(f"\n[OK] Evaluation complete!")
+    print(f"[OK] Evaluated: {evaluated_count} items")
+    if error_count > 0:
+        print(f"[WARNING] Errors: {error_count} items")
+    
+    return evaluated_count
+
 if __name__ == '__main__':
     import argparse
     
@@ -578,7 +691,7 @@ if __name__ == '__main__':
     if args.eval_only:
         # Only run evaluation
         run_evaluation_pipeline(
-            db_path='mydb.db',
+            db_path=DB_PATH,
             ollama_base_url=args.ollama_url,
             model=args.model,
             hours=args.hours,
@@ -600,7 +713,7 @@ if __name__ == '__main__':
         if args.evaluate:
             print("\n" + "=" * 60)
             run_evaluation_pipeline(
-                db_path='mydb.db',
+                db_path=DB_PATH,
                 ollama_base_url=args.ollama_url,
                 model=args.model,
                 hours=args.hours,

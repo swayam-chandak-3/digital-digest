@@ -1,6 +1,8 @@
 """TextRank summary + LLM evaluation: graph-based summarization (sumy), store in items.summary, evaluate with same schema as evaluation.py."""
 
 import sqlite3
+import os
+from pathlib import Path
 
 from sumy.nlp.tokenizers import Tokenizer
 from sumy.parsers.plaintext import PlaintextParser
@@ -11,16 +13,10 @@ import requests
 import time
 import json
 import re
+from dotenv import load_dotenv
+load_dotenv()
 
-from evaluation import (
-    save_evaluation,
-)
-from pathlib import Path
-
-DB_PATH = Path(
-    "C:/Users/SwayamShivkumarChand/Desktop/Learning/Project/Daily Digest/"
-    "daily-digest/digital-digest/src/models/mydb.db"
-)
+DB_PATH = Path(os.getenv('DB_PATH', 'mydb.db'))
 
 
 GENAI_NEWS_MIN_RELEVANCE = 0.6
@@ -163,51 +159,34 @@ def run_evaluation_textrank_pipeline(
 
     return evaluated_count
 
-
 def get_items_for_evaluation(db_path='mydb.db', hours=24):
-    """Get items that need evaluation.
-    
+    """
+    Get ALL items that need evaluation.
+
     Criteria:
-    - Published within last `hours` (default 24). Use hours=0 or None to skip time filter (all unevaluated).
     - Status is 'INGESTED' or 'PREFILTERED'
-    - Not already evaluated (no entry in evaluations table for GENAI_NEWS persona)
+    - Not already evaluated for GENAI_NEWS persona
     """
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
-        use_time_filter = hours is not None and hours > 0
-        if use_time_filter:
-            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
-            cutoff_str = cutoff_time.strftime('%Y-%m-%d %H:%M:%S')
 
-        # published_at can be: NULL, ISO 8601 text (e.g. ...T...Z or ...+00:00), or Unix timestamp (integer).
-        time_cond = """
-            (
-            i.published_at IS NULL
-            OR (
-                typeof(i.published_at) IN ('integer', 'real')
-                AND datetime(cast(i.published_at AS INTEGER), 'unixepoch') >= datetime(?)
-            )
-            OR (
-                typeof(i.published_at) = 'text'
-                AND datetime(
-                    replace(replace(replace(trim(i.published_at), 'T', ' '), 'Z', ''), '+00:00', '')
-                ) >= datetime(?)
-            )
-            )
-        """ if use_time_filter else "1"
-        query = f"""
+        query = """
         SELECT i.id, i.title, i.content, i.url, i.published_at, i.source, i.status
         FROM items i
-        LEFT JOIN evaluations e ON i.id = e.item_id AND e.persona = 'GENAI_NEWS'
-        WHERE {time_cond}
-          AND i.status IN ('INGESTED', 'PREFILTERED')
+        LEFT JOIN evaluations e
+          ON i.id = e.item_id
+         AND e.persona = 'GENAI_NEWS'
+        WHERE i.status IN ('INGESTED', 'PREFILTERED')
           AND e.id IS NULL
-        ORDER BY i.published_at DESC NULLS LAST, i.ingestion_time DESC
+        ORDER BY
+          i.ingestion_time DESC,
+          i.id DESC
         """
-        cur.execute(query, (cutoff_str, cutoff_str) if use_time_filter else ())
+
+        cur.execute(query)
         rows = cur.fetchall()
-        
+
         items = []
         for row in rows:
             items.append({
@@ -217,8 +196,9 @@ def get_items_for_evaluation(db_path='mydb.db', hours=24):
                 'url': row[3],
                 'published_at': row[4],
                 'source': row[5],
-                'status': row[6]
+                'status': row[6],
             })
+
         return items
     finally:
         conn.close()
