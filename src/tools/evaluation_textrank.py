@@ -384,4 +384,3 @@ if __name__ == '__main__':
         timeout=args.timeout,
         top_n_sentences=args.top_n,
     )
-

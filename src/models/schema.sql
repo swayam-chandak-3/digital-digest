@@ -15,6 +15,7 @@
 --     source_url TEXT,
 
 --     -- Content
+--     digest_type TEXT NOT NULL,                
 --     title TEXT NOT NULL,
 --     description TEXT,                        -- short summary if available
 --     summary TEXT,                            -- generated or stored summary
@@ -126,8 +127,9 @@
 -- ALTER TABLE evaluations ADD COLUMN evaluation_type TEXT;
 
 -- DELETE FROM evaluations;
--- delete from items;
+delete from items;
 
+-- alter table items add digest_type TEXT DEFAULT "";
 -- alter table items add column likes INTEGER DEFAULT 0;
 --     alter table items add column comments INTEGER DEFAULT 0;
 --     alter table items add column views INTEGER DEFAULT 0;

@@ -1,6 +1,24 @@
 # Fix for Python 3.9+ compatibility with older BeautifulSoup versions
 import sys
 import collections
+import os
+import requests
+import time
+import re
+import json
+from dotenv import load_dotenv
+load_dotenv()
+from urllib.parse import urlparse
+from bs4 import BeautifulSoup
+from readability import Document
+from datetime import datetime, timezone, timedelta
+from ..tools.helper import _evaluate_one_item, get_items_for_evaluation, save_evaluation
+from ..tools.db_utils import save_items_to_db, categorize_article
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+DB_PATH = Path(os.getenv('DB_PATH', 'mydb.db'))
+
 if sys.version_info >= (3, 9):
     try:
         from collections.abc import Callable
@@ -10,68 +28,6 @@ if sys.version_info >= (3, 9):
         from typing import Callable
         if not hasattr(collections, 'Callable'):
             collections.Callable = Callable
-
-import os
-import requests
-import time
-import re
-import json
-import sqlite3
-from dotenv import load_dotenv
-load_dotenv()
-from urllib.parse import urlparse
-from bs4 import BeautifulSoup, SoupStrainer
-from readability import Document
-from datetime import datetime, timezone, timedelta
-from ..tools.helper import _evaluate_one_item, get_items_for_evaluation, save_evaluation
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
-
-DB_PATH = Path(os.getenv('DB_PATH', 'mydb.db'))
-
-# Topic keywords for categorization
-TOPIC_KEYWORDS = {
-    'LLM/AI': [
-        'llm', 'large language model', 'gpt', 'claude', 'ai model', 'language model',
-        'transformer', 'neural network', 'machine learning', 'deep learning',
-        'artificial intelligence', 'chatbot', 'generative ai', 'openai', 'anthropic',
-        'prompt engineering', 'fine-tuning', 'hallucination', 'constitution', 'alignment'
-    ],
-    'Programming/Software': [
-        'programming', 'code', 'developer', 'software', 'algorithm', 'api', 'framework',
-        'library', 'github', 'repository', 'open source', 'programming language',
-        'javascript', 'python', 'java', 'c++', 'rust', 'go', 'function', 'variable'
-    ]
-}
-
-def categorize_article(text, title='', domain=''):
-    """Categorize an article based on its content."""
-    if not text:
-        return []
-    
-    full_text = f"{title} {text}".lower()
-    category_scores = {}
-    
-    for category, keywords in TOPIC_KEYWORDS.items():
-        score = 0
-        for keyword in keywords:
-            pattern = r'\b' + re.escape(keyword.lower()) + r'\b'
-            matches = len(re.findall(pattern, full_text))
-            score += matches
-        
-        if score > 0:
-            category_scores[category] = score
-    
-    # Return categories with significant scores
-    sorted_categories = sorted(category_scores.items(), key=lambda x: x[1], reverse=True)
-    if not sorted_categories:
-        return []
-    
-    primary_score = sorted_categories[0][1]
-    threshold = primary_score * 0.3
-    categories = [cat for cat, score in sorted_categories if score >= threshold]
-    
-    return categories
 
 def _extract_metadata(soup):
     """Extract author and publish datetime metadata from a BeautifulSoup document."""
@@ -340,7 +296,7 @@ def scrape_and_categorize_articles(entries, delay=1, verbose=False):
         
         parsed = urlparse(url)
         domain = parsed.netloc.replace('www.', '')
-        categories = categorize_article(text, title, domain)
+        categories = categorize_article(text, title, domain, news_type=['LLM/AI', 'Programming/Software'])
         matches_target = any(cat in categories for cat in target_categories)
         
         if matches_target:
@@ -439,98 +395,6 @@ def save_filtered_articles(articles, output_file='HackerNews/llm_programming_art
 
     return output_file
 
-def save_articles_to_db(articles, db_path=DB_PATH):
-    """Persist articles into the items table, skipping duplicate titles."""
-    if not articles:
-        return 0
-
-    conn = sqlite3.connect(db_path)
-    try:
-        cur = conn.cursor()
-
-        # 1️⃣ Fetch existing titles once
-        cur.execute("SELECT title FROM items")
-        existing_titles = {row[0] for row in cur.fetchall() if row[0]}
-
-        rows = []
-        skipped = 0
-
-        for article in articles:
-            title = article.get('title')
-
-            # 2️⃣ Skip if title already exists
-            if title in existing_titles:
-                skipped += 1
-                continue
-
-            source_name = article.get('source') or 'unknown'
-            link = article.get('link')
-            content = article.get('content')
-            published_at = article.get('publish_datetime')
-            engagement_score = article.get('engagement_score')
-            likes = article.get('points', 0)  # Map points to likes
-            comments = article.get('num_comments', 0)  # Map num_comments to comments
-
-            # Resolve source_id
-            cur.execute(
-                "SELECT id FROM sources WHERE LOWER(source) = ?",
-                (source_name.lower(),)
-            )
-            source_result = cur.fetchone()
-            source_id = int(source_result[0]) if source_result else None
-
-            row = (
-                source_name,
-                source_id,
-                link,
-                title,
-                None,                        # description
-                article.get('summary'),     # summary (NULL for now)
-                content,
-                link,
-                published_at,
-                engagement_score,
-                likes,
-                comments,
-                json.dumps(article),
-            )
-
-            rows.append(row)
-            existing_titles.add(title)  # prevent duplicates in same run
-
-        if rows:
-            cur.executemany(
-                """
-                INSERT INTO items (
-                    source,
-                    source_id,
-                    source_url,
-                    title,
-                    description,
-                    summary,
-                    content,
-                    url,
-                    published_at,
-                    engagement_score,
-                    likes,
-                    comments,
-                    raw_metadata,
-                    status
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PREFILTERED')
-                """,
-                rows,
-            )
-            conn.commit()
-
-        if skipped > 0:
-            print(f"[INFO] Skipped {skipped} duplicate titles")
-
-        return len(rows)
-
-    finally:
-        conn.close()
-
 
 def run_pipeline(num_pages=3, delay=1, verbose=True, output_file='HackerNews/llm_programming_articles.json',
                  hours_window=DEFAULT_HOURS_WINDOW, min_points=DEFAULT_MIN_POINTS, min_comments=DEFAULT_MIN_COMMENTS):
@@ -573,12 +437,12 @@ def run_pipeline(num_pages=3, delay=1, verbose=True, output_file='HackerNews/llm
     # Step 5: Persist into the items table
     print("\nStep 5: Writing articles to database (items table)...")
     try:
-        inserted = save_articles_to_db(filtered_articles)
+        inserted = save_items_to_db(filtered_articles, db_path=DB_PATH, digest_type='GENAI')
         print(f"[OK] Inserted {inserted} rows into items table")
     except Exception as e:
         print(f"[ERROR] Failed to insert into items table: {e}")
     
-    print(f"\n[OK] Pipeline complete!")
+    print("\n[OK] Pipeline complete!")
     print(f"[OK] Saved {len(filtered_articles)} articles to: {output_path}")
     
     # Summary by category
