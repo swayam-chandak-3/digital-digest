@@ -221,12 +221,12 @@ def run_summarization_textrank_pipeline(
     return saved
 
 
-def get_digest_entries(db_path, source="TEXTRANK"):
+def get_digest_entries(db_path):
     """
     Load digest entries directly from items + evaluations.
     Returns list of dicts with keys:
     headline, lead, why_it_matters, target_audience, topic, url,
-    item_id, likes, comments
+    item_id, likes, comments, digest_type
     """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -244,17 +244,16 @@ def get_digest_entries(db_path, source="TEXTRANK"):
                 e.topic,
                 i.url,
                 COALESCE(i.likes, 0) AS likes,
-                COALESCE(i.comments, 0) AS comments
+                COALESCE(i.comments, 0) AS comments,
+                json_extract(i.raw_metadata, '$.digest_type') AS digest_type
             FROM items i
             JOIN evaluations e
               ON e.item_id = i.id
             WHERE e.decision = 'KEEP'
-              AND e.evaluation_type = ?
             ORDER BY
                 i.published_at DESC,
                 i.ingestion_time DESC
-            """,
-            (source,),
+            """
         )
 
         rows = cur.fetchall()
@@ -270,6 +269,7 @@ def get_digest_entries(db_path, source="TEXTRANK"):
                 "url": r["url"] or "",
                 "likes": r["likes"],
                 "comments": r["comments"],
+                "digest_type": r["digest_type"] or "GENAI",
             }
             for r in rows
         ]

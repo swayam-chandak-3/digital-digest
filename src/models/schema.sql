@@ -117,8 +117,8 @@
 -- delete from dedup_clusters;
 -- delete from items;
 
--- UPDATE items
--- SET status = 'INGESTED';
+UPDATE items
+SET status = 'INGESTED';
 
 -- Add summary column to items if it does not exist (run once on existing DBs):
 -- ALTER TABLE items ADD COLUMN summary TEXT;
@@ -127,7 +127,7 @@
 -- ALTER TABLE evaluations ADD COLUMN evaluation_type TEXT;
 
 -- DELETE FROM evaluations;
-delete from items;
+-- delete from items;
 
 -- alter table items add digest_type TEXT DEFAULT "";
 -- alter table items add column likes INTEGER DEFAULT 0;

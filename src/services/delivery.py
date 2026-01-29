@@ -125,10 +125,11 @@ def _escape_telegram_markdown(s):
     return s
 
 
-def _build_entry_markdown(entry, escape_for_telegram=True):
+def _build_entry_markdown(entry, escape_for_telegram=True, include_digest_type_header=False):
     """
     Build markdown for a single entry.
     Returns the formatted entry text.
+    If include_digest_type_header=True, add digest type header (PRODUCT or GEN AI) before the entry.
     """
     def esc(t):
         return _escape_telegram_markdown(t) if escape_for_telegram else (t or "")
@@ -141,6 +142,7 @@ def _build_entry_markdown(entry, escape_for_telegram=True):
     topic = entry.get("topic") or ""
     likes = entry.get("likes", 0)
     comments = entry.get("comments", 0)
+    digest_type = entry.get("digest_type", "GENAI")
     
     entry_lines = []
     
@@ -156,6 +158,14 @@ def _build_entry_markdown(entry, escape_for_telegram=True):
         why_esc = why
         audience_esc = audience
         topic_esc = topic
+    
+    # Add digest type header if requested
+    if include_digest_type_header:
+        digest_type_label = "GEN AI" if digest_type == "GENAI" else "PRODUCT"
+        if escape_for_telegram:
+            entry_lines.append(f"*{_escape_telegram_markdown(digest_type_label)}*")
+        else:
+            entry_lines.append(f"*{digest_type_label}*")
     
     # Build the link
     if url:
@@ -189,12 +199,18 @@ def _build_entry_markdown(entry, escape_for_telegram=True):
     return "\n".join(entry_lines)
 
 
-def build_digest_messages(entries, title="Daily Digest", escape_for_telegram=True, max_message_length=4000):
+def build_digest_messages(entries, title="Daily Digest", escape_for_telegram=True, max_message_length=4000, separate_by_type=False):
     """
     Build multiple Telegram messages ensuring each entry stays intact within a message.
     Returns list of message texts.
     If an entry doesn't fit in current message, it goes to the next message.
     All entries are guaranteed to be included.
+    
+    If separate_by_type=True:
+    - Groups entries by digest_type (GENAI first, then PRODUCT)
+    - Each type may span multiple messages
+    
+    Each entry will have its digest type header (GEN AI or PRODUCT) in bold.
     """
     if not entries:
         no_items = "No items in this digest\\." if escape_for_telegram else "No items in this digest."
@@ -205,13 +221,17 @@ def build_digest_messages(entries, title="Daily Digest", escape_for_telegram=Tru
     title_safe = _escape_telegram_markdown(title) if escape_for_telegram else title
     header = f"*{title_safe}*\n\n"
     
+    # Sort entries: GENAI first, then PRODUCT
+    if separate_by_type:
+        entries = sorted(entries, key=lambda e: (e.get("digest_type", "GENAI") != "GENAI", e.get("digest_type", "GENAI")))
+    
     current_message = header
     current_length = len(header)
     buffer_for_safety = 150  # Safety buffer for Telegram limits
     
     for i, entry in enumerate(entries, 1):
-        # Build the entry
-        entry_text = _build_entry_markdown(entry, escape_for_telegram)
+        # Build the entry with digest type header
+        entry_text = _build_entry_markdown(entry, escape_for_telegram, include_digest_type_header=True)
         entry_length = len(entry_text) + 2  # +2 for newlines
         entry_with_separator = entry_text + "\n\n"
         
@@ -233,10 +253,15 @@ def build_digest_messages(entries, title="Daily Digest", escape_for_telegram=Tru
     return messages
 
 
-def build_digest_markdown(entries, title="Daily Digest", escape_for_telegram=True, max_message_length=999999):
+def build_digest_markdown(entries, title="Daily Digest", escape_for_telegram=True, max_message_length=999999, separate_by_type=False):
     """
     Build full Markdown body for file output (no message limits).
     When escape_for_telegram=True, escapes special chars for Telegram MarkdownV2.
+    
+    If separate_by_type=True:
+    - Groups entries by digest_type (GENAI first, then PRODUCT)
+    
+    Each entry will have its digest type header (GEN AI or PRODUCT) in bold.
     """
     if not entries:
         no_items = "No items in this digest\\." if escape_for_telegram else "No items in this digest."
@@ -246,8 +271,12 @@ def build_digest_markdown(entries, title="Daily Digest", escape_for_telegram=Tru
     title_safe = _escape_telegram_markdown(title) if escape_for_telegram else title
     lines = [f"*{title_safe}*", ""]
     
+    # Sort entries: GENAI first, then PRODUCT
+    if separate_by_type:
+        entries = sorted(entries, key=lambda e: (e.get("digest_type", "GENAI") != "GENAI", e.get("digest_type", "GENAI")))
+    
     for i, e in enumerate(entries, 1):
-        entry_text = _build_entry_markdown(e, escape_for_telegram)
+        entry_text = _build_entry_markdown(e, escape_for_telegram, include_digest_type_header=True)
         lines.append(entry_text)
         lines.append("")
     
@@ -371,15 +400,21 @@ def run_delivery(
     source=None,
     output_dir="output",
     verbose=True,
+    separate_by_type=True,
 ):
     """
     Load digest entries, write JSON + Markdown files (always), then send via
     channels configured for this persona (email, telegram).
     Entries are sorted by total engagement (likes + comments) in descending order.
+    
+    If separate_by_type=True:
+    - Separates GENAI and PRODUCT entries
+    - Sends all GENAI news first, then PRODUCT news in a new message
+    - Adds digest type headers to each section
     """
     source = source or DEFAULT_SOURCE
     try:
-        entries = get_digest_entries(db_path=DB_PATH, source=source)
+        entries = get_digest_entries(db_path=DB_PATH)
     except Exception as e:
         if verbose:
             print(f"[Delivery] Failed to load digest entries: {e}")
@@ -400,7 +435,12 @@ def run_delivery(
 
     channels = config["channels"]
     html = build_digest_html(entries, title=title)
-    md_telegram_messages = build_digest_messages(entries, title=title, escape_for_telegram=True)
+    md_telegram_messages = build_digest_messages(
+        entries, 
+        title=title, 
+        escape_for_telegram=True,
+        separate_by_type=separate_by_type
+    )
     subject = f"{title} — {len(entries)} items"
 
     # 2. Email (HTML)
@@ -432,6 +472,7 @@ if __name__ == "__main__":
     p.add_argument("--db", default="mydb.db", help="Database path")
     p.add_argument("--source", default=None, help="item_summaries source (default: TEXTRANK)")
     p.add_argument("--output-dir", default="output", help="Directory for JSON/MD fallback files")
+    p.add_argument("--no-separate-types", action="store_true", help="Don't separate GENAI and PRODUCT entries")
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args()
     run_delivery(
@@ -440,4 +481,5 @@ if __name__ == "__main__":
         source=args.source,
         output_dir=args.output_dir,
         verbose=not args.quiet,
+        separate_by_type=not args.no_separate_types,
     )

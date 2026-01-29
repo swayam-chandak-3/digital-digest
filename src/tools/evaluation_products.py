@@ -1,27 +1,25 @@
-"""TextRank summary + LLM evaluation: graph-based summarization (sumy), store in items.summary, evaluate with same schema as evaluation.py."""
+"""TextRank summary + LLM evaluation for PRODUCT news: graph-based summarization (sumy), store in items.summary, evaluate with product-focused schema."""
 
 import sqlite3
 import os
 from pathlib import Path
-
-from sumy.nlp.tokenizers import Tokenizer
-from sumy.parsers.plaintext import PlaintextParser
-from sumy.summarizers.text_rank import TextRankSummarizer
-
-from datetime import datetime, timezone, timedelta
 import requests
 import time
 import json
 import re
 from dotenv import load_dotenv
-from .db_utils import save_evaluation
+
+from sumy.nlp.tokenizers import Tokenizer
+from sumy.parsers.plaintext import PlaintextParser
+from sumy.summarizers.text_rank import TextRankSummarizer
+
+from src.tools.db_utils import save_evaluation
 
 load_dotenv()
 
 DB_PATH = Path(os.getenv('DB_PATH', 'mydb.db'))
 
-
-GENAI_NEWS_MIN_RELEVANCE = 0.6
+PRODUCT_NEWS_MIN_REUSABILITY = 0.5
 
 def summarize_by_textrank(text, top_n=5, language='english'):
     """
@@ -63,7 +61,7 @@ def update_item_summary(item_id, summary, db_path=DB_PATH):
 
 def _process_one_item(item, ollama_base_url, model, timeout, db_path, top_n_sentences):
     """
-    For one item: build TextRank summary, update items.summary, evaluate using summary, return (item_id, evaluation, error).
+    For one item: build TextRank summary, update items.summary, evaluate using summary for PRODUCT news, return (item_id, evaluation, error).
     """
     try:
         content = item.get('content') or ''
@@ -71,7 +69,7 @@ def _process_one_item(item, ollama_base_url, model, timeout, db_path, top_n_sent
         if not summary.strip():
             summary = (item.get('title') or '')[:500]
         update_item_summary(item['id'], summary, db_path=db_path)
-        evaluation = evaluate_with_gemma3(
+        evaluation = evaluate_product_with_llm(
             title=item['title'],
             content=summary,
             url=item['url'] or '',
@@ -84,30 +82,29 @@ def _process_one_item(item, ollama_base_url, model, timeout, db_path, top_n_sent
         return (item['id'], None, e)
 
 
-def run_evaluation_textrank_pipeline(
+def run_evaluation_textrank_product_pipeline(
     db_path=r'C:/Users/SwayamShivkumarChand/Desktop/Learning/Project/Daily Digest/daily-digest/digital-digest/src/models/mydb.db',
     ollama_base_url='http://localhost:11434',
     model='llama3.1',
-    hours=24,
     verbose=True,
     timeout=180,
     top_n_sentences=5,
 ):
     """
-    Run TextRank summary + evaluation pipeline (one item at a time):
+    Run TextRank summary + product evaluation pipeline (one item at a time):
 
-    1. Fetch items that need evaluation (same criteria as evaluation.py).
+    1. Fetch items that need evaluation from today's ingestion (digest_type='PRODUCT').
     2. For each item: TextRank (graph-based) summary → top N sentences.
     3. Save summary to items.summary.
-    4. Evaluate with Gemma using summary (same output: relevance_score, topic, why_it_matters, target_audience, decision).
+    4. Evaluate with LLM using summary for PRODUCT news (output: idea_type, problem_statement, solution_summary, maturity_level, reusability_score, decision).
     5. Save to evaluations table.
     """
     print("=" * 60)
-    print("EVALUATION PIPELINE (TextRank summary)")
+    print("PRODUCT EVALUATION PIPELINE (TextRank summary)")
     print("=" * 60)
 
-    print(f"\nStep 1: Fetching items for evaluation (published in last {hours} hours)...")
-    items = get_items_for_evaluation(db_path, hours)
+    print(f"\nStep 1: Fetching PRODUCT items from today for evaluation...")
+    items = get_items_for_evaluation(db_path)
 
     if not items:
         print("[OK] No items found that need evaluation.")
@@ -115,7 +112,7 @@ def run_evaluation_textrank_pipeline(
 
     print(f"[OK] Found {len(items)} items (summarize with TextRank top {top_n_sentences} sentences, then evaluate with {model})")
 
-    print("\nStep 2: Building TextRank summaries and evaluating (one at a time)...")
+    print("\nStep 2: Building TextRank summaries and evaluating for PRODUCT news (one at a time)...")
     evaluated_count = 0
     error_count = 0
 
@@ -132,19 +129,20 @@ def run_evaluation_textrank_pipeline(
                     print(f"    [ERROR] {err}")
                 continue
             
-            score = float(evaluation.get('relevance_score', 0.0))
-            if score < GENAI_NEWS_MIN_RELEVANCE:
+            score = float(evaluation.get('reusability_score', 0.0))
+            if score < PRODUCT_NEWS_MIN_REUSABILITY:
                 evaluation['decision'] = 'REJECT'
                 if verbose:
-                    print(f"    [REJECTED] Relevance {score:.2f} < {GENAI_NEWS_MIN_RELEVANCE}")
+                    print(f"    [REJECTED] Reusability {score:.2f} < {PRODUCT_NEWS_MIN_REUSABILITY}")
                 continue
-            # Save to evaluations table (mydb.db by default) with evaluation_type='TEXTRANK'
-            if save_evaluation(item_id, evaluation, persona='GENAI_NEWS', db_path=db_path, evaluation_type='TEXTRANK'):
+            
+            # Save to evaluations table with evaluation_type='TEXTRANK_PRODUCT'
+            if save_evaluation(item_id, evaluation, persona='PRODUCT_IDEAS', db_path=db_path, evaluation_type='TEXTRANK_PRODUCT'):
                 evaluated_count += 1
                 if verbose:
                     decision = evaluation['decision']
-                    score = evaluation['relevance_score']
-                    print(f"    [{decision}] Relevance: {score:.2f} | Topic: {evaluation['topic']}")
+                    score = evaluation['reusability_score']
+                    print(f"    [{decision}] Reusability: {score:.2f} | Idea Type: {evaluation['idea_type']}")
             else:
                 error_count += 1
                 if verbose:
@@ -154,20 +152,23 @@ def run_evaluation_textrank_pipeline(
             if verbose:
                 print(f"    [ERROR] {e}")
 
-    print(f"\n[OK] Evaluation complete!")
+    print(f"\n[OK] Product evaluation complete!")
     print(f"[OK] Evaluated: {evaluated_count} items (summaries saved to items.summary)")
     if error_count > 0:
         print(f"[WARNING] Errors: {error_count} items")
 
     return evaluated_count
 
-def get_items_for_evaluation(db_path='mydb.db', hours=24):
+
+def get_items_for_evaluation(db_path='mydb.db'):
     """
-    Get ALL items that need evaluation.
+    Get items that need evaluation.
 
     Criteria:
     - Status is 'INGESTED' or 'PREFILTERED'
-    - Not already evaluated for GENAI_NEWS persona
+    - Not already evaluated for PRODUCT_IDEAS persona
+    - digest_type is 'PRODUCT' (from raw_metadata JSON)
+    - ingestion_time is today's date (regardless of current time)
     """
     conn = sqlite3.connect(db_path)
     try:
@@ -178,10 +179,11 @@ def get_items_for_evaluation(db_path='mydb.db', hours=24):
         FROM items i
         LEFT JOIN evaluations e
           ON i.id = e.item_id
-         AND e.persona = 'GENAI_NEWS'
+         AND e.persona = 'PRODUCT_IDEAS'
         WHERE i.status IN ('INGESTED', 'PREFILTERED')
-          AND i.digest_type = 'GENAI'
           AND e.id IS NULL
+          AND json_extract(i.raw_metadata, '$.digest_type') = 'PRODUCT'
+          AND DATE(i.ingestion_time) = DATE('now')
         ORDER BY
           i.ingestion_time DESC,
           i.id DESC
@@ -207,34 +209,46 @@ def get_items_for_evaluation(db_path='mydb.db', hours=24):
         conn.close()
 
 
-def evaluate_with_gemma3(title, content, url, ollama_base_url='http://localhost:11434', model='gemma3', timeout=180, max_retries=2):
-    """Evaluate an article using Gemma3 via Ollama API.
+def evaluate_product_with_llm(title, content, url, ollama_base_url='http://localhost:11434', model='llama3.1', timeout=180, max_retries=2):
+    """Evaluate an article for PRODUCT news using LLM via Ollama API.
     
     Args:
         title: Article title
-        content: Article content
+        content: Article content (summary)
         url: Article URL
         ollama_base_url: Ollama API base URL
         model: Model name to use
         timeout: Request timeout in seconds (default: 180 for large models)
         max_retries: Maximum number of retry attempts (default: 2)
     
-    Returns a dict with: relevance_score, decision, topic, why_it_matters, target_audience
+    Returns a dict with: idea_type, problem_statement, solution_summary, maturity_level, target_audience, topic, why_it_matters, reusability_score, decision
     """
-    # Prepare the prompt for GENAI_NEWS evaluation
-    prompt = f"""You are a technical news evaluator for AI engineers. 
-        Evaluate the following Hacker News article for relevance to AI/LLM/Programming news.
+    # Prepare the prompt for PRODUCT_IDEAS evaluation
+    prompt = f"""You are a technical news evaluator for AI/product engineers.
+Evaluate the following article for PRODUCT-related news and return JSON with:
+idea_type, problem_statement, solution_summary, maturity_level, target_audience(developer, manager or architect),
+topic, why_it_matters, reusability_score (0-1), decision (KEEP|DROP).
+
+Scoring guidance:
+- Higher scores when the article describes a specific product, MVP, launch, or growth experiment,
+  with concrete signals (tech stack, pricing, traction, user outcomes).
+- Lower scores for generic founder stories without actionable product signals.
+Decision rule: KEEP if reusability_score >= {PRODUCT_NEWS_MIN_REUSABILITY}, else DROP.
 
 Title: {title}
 URL: {url}
 Content: {content[:2000] if content else 'No content available'}
 
 Provide a JSON response with the following fields:
-- relevance_score: float between 0.0 and 1.0 (how relevant is this to AI/LLM/Programming?)
-- decision: "KEEP" or "DROP" (should this be included in the digest?)
-- topic: brief topic/category (e.g., "LLM Research", "AI Tools", "Programming Languages")
-- why_it_matters: 1-2 sentence explanation of why this matters
-- target_audience: one of "developer", "software architect", or "manager"
+- idea_type: brief category (e.g., "SaaS Tool", "Mobile App", "AI Product", "Hardware")
+- problem_statement: what problem does this solve (1-2 sentences)
+- solution_summary: how does the product solve it (1-2 sentences)
+- maturity_level: one of "concept", "mvp", "beta", "launched", "scaling"
+- target_audience: primary audience persona (one of "developer", "architect", or "manager")
+- topic: category or domain of this product (e.g., "Cloud Infrastructure", "AI/ML", "E-commerce")
+- why_it_matters: why is this product/idea important or relevant for the target audience (2-3 sentences)
+- reusability_score: float between 0.0 and 1.0 (how reusable/actionable are the insights?)
+- decision: "KEEP" or "DROP" (should this be included in the product digest?)
 
 Respond ONLY with valid JSON, no additional text."""
 
@@ -276,7 +290,6 @@ Respond ONLY with valid JSON, no additional text."""
                 raise
     
     try:
-        
         result = response.json()
         response_text = result.get('response', '').strip()
         
@@ -301,24 +314,36 @@ Respond ONLY with valid JSON, no additional text."""
                 raise ValueError(f"Could not parse JSON from response: {response_text[:200]}")
         
         # Validate and normalize the response
+        target_audience = evaluation.get('target_audience', 'developer').lower()
+        if target_audience not in ('developer', 'architect', 'manager'):
+            target_audience = 'developer'  # Default fallback
+        
         return {
-            'relevance_score': float(evaluation.get('relevance_score', 0.0)),
-            'decision': evaluation.get('decision', 'DROP').upper(),
-            'topic': evaluation.get('topic', 'Unknown'),
+            'idea_type': evaluation.get('idea_type', 'Unknown'),
+            'problem_statement': evaluation.get('problem_statement', ''),
+            'solution_summary': evaluation.get('solution_summary', ''),
+            'maturity_level': evaluation.get('maturity_level', 'unknown'),
+            'target_audience': target_audience,
+            'topic': evaluation.get('topic', ''),
             'why_it_matters': evaluation.get('why_it_matters', ''),
-            'target_audience': evaluation.get('target_audience', 'developer'),
+            'reusability_score': float(evaluation.get('reusability_score', 0.0)),
+            'decision': evaluation.get('decision', 'DROP').upper(),
             'llm_model': model
         }
         
     except Exception as e:
-        print(f"Error evaluating with Gemma3: {e}")
+        print(f"Error evaluating product with LLM: {e}")
         # Return default values on error
         return {
-            'relevance_score': 0.0,
-            'decision': 'DROP',
-            'topic': 'Error',
-            'why_it_matters': f'Evaluation failed: {str(e)}',
+            'idea_type': 'Error',
+            'problem_statement': f'Evaluation failed: {str(e)}',
+            'solution_summary': '',
+            'maturity_level': 'unknown',
             'target_audience': 'developer',
+            'topic': '',
+            'why_it_matters': '',
+            'reusability_score': 0.0,
+            'decision': 'DROP',
             'llm_model': model
         }
 
@@ -327,23 +352,21 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser(
-        description='Evaluation with TextRank summary: graph-based summarization (sumy), then evaluate with Gemma'
+        description='Product Evaluation with TextRank summary: graph-based summarization (sumy), then evaluate for product insights'
     )
     parser.add_argument('--db', type=str, default=DB_PATH, help='Database file path')
     parser.add_argument('--ollama-url', type=str, default='http://localhost:11434', help='Ollama base URL')
-    parser.add_argument('--model', type=str, default='gemma3:12b', help='Ollama model name')
-    parser.add_argument('--hours', type=int, default=24, help='Hours to look back (default: 24). Use 0 for no time limit.')
+    parser.add_argument('--model', type=str, default='llama3.1', help='Ollama model name')
     parser.add_argument('--timeout', type=int, default=180, help='Request timeout in seconds')
     parser.add_argument('--top-n', type=int, default=5, help='Number of top TextRank sentences for summary (default: 5)')
     parser.add_argument('--quiet', action='store_true', help='Reduce verbose output')
 
     args = parser.parse_args()
 
-    run_evaluation_textrank_pipeline(
+    run_evaluation_textrank_product_pipeline(
         db_path=args.db,
         ollama_base_url=args.ollama_url,
         model=args.model,
-        hours=args.hours,
         verbose=not args.quiet,
         timeout=args.timeout,
         top_n_sentences=args.top_n,

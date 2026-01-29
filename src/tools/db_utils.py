@@ -289,3 +289,60 @@ def save_items_to_db(items, db_path: str, digest_type: str = None) -> int:
         return 0
     finally:
         conn.close()
+
+
+def save_evaluation(item_id, evaluation_result, persona='GENAI_NEWS', db_path='mydb.db', evaluation_type='FULL'):
+    """Save evaluation result to the evaluations table.
+    
+    Args:
+        item_id: ID of the item being evaluated
+        evaluation_result: Dictionary containing evaluation results
+        persona: Persona for evaluation (e.g., 'GENAI_NEWS', 'PRODUCT_IDEAS')
+        db_path: Path to the SQLite database file
+        evaluation_type: Type of evaluation (e.g., 'FULL', 'TFIDF', 'TEXTRANK', 'TEXTRANK_PRODUCT')
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        
+        # Build the evaluation record with available fields
+        # Different personas may have different fields in evaluation_result
+        cur.execute("""
+            INSERT OR REPLACE INTO evaluations (
+                item_id, persona, decision, relevance_score,
+                topic, why_it_matters, target_audience, 
+                idea_type, problem_statement, solution_summary, maturity_level, reusability_score,
+                llm_model, evaluation_type
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            item_id,
+            persona,
+            evaluation_result.get('decision', 'DROP'),
+            evaluation_result.get('relevance_score') or evaluation_result.get('reusability_score'),
+            evaluation_result.get('topic'),
+            evaluation_result.get('why_it_matters'),
+            evaluation_result.get('target_audience'),
+            evaluation_result.get('idea_type'),
+            evaluation_result.get('problem_statement'),
+            evaluation_result.get('solution_summary'),
+            evaluation_result.get('maturity_level'),
+            evaluation_result.get('reusability_score') or evaluation_result.get('relevance_score'),
+            evaluation_result.get('llm_model'),
+            evaluation_type,
+        ))
+        
+        # Update item status to EVALUATED
+        cur.execute("UPDATE items SET status = 'EVALUATED' WHERE id = ?", (item_id,))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        print(f"Error saving evaluation for item {item_id}: {e}")
+        return False
+    finally:
+        conn.close()
