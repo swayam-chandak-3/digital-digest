@@ -1,11 +1,11 @@
-1. add user info
+1. add user info- done
 2. add article keywords in schema and implement in pipeline
 3. add user preference for article keywords
 4. use huggingface models
 5. make the evaluation faster
 6. use pep8 and microsoft commit naming convention
 7. filtering in a util folder
-8. db functions in a util folder
+8. db functions in a util folder- done
 
 VLLM
 CRAWL FOR AI
