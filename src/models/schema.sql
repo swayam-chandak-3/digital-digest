@@ -1,3 +1,17 @@
+-- CREATE TABLE preference (
+--     id INTEGER PRIMARY KEY AUTOINCREMENT,
+--     news_type TEXT NOT NULL
+-- );
+
+-- CREATE TABLE users (
+--     id INTEGER PRIMARY KEY AUTOINCREMENT,
+--     name TEXT,
+--     emailid TEXT,
+--     telegramid TEXT,
+--     topic_preference INTEGER NOT NULL,
+--     FOREIGN KEY (topic_preference) REFERENCES preference(id)
+-- );
+
 -- CREATE TABLE sources (
 --     id INTEGER PRIMARY KEY AUTOINCREMENT,
 --     source TEXT NOT NULL UNIQUE              -- hackernews, reddit, rss, etc
@@ -117,8 +131,9 @@
 -- delete from dedup_clusters;
 -- delete from items;
 
-UPDATE items
-SET status = 'INGESTED';
+UPDATE users
+SET telegramid = 1676531263
+where id=3;
 
 -- Add summary column to items if it does not exist (run once on existing DBs):
 -- ALTER TABLE items ADD COLUMN summary TEXT;
@@ -129,7 +144,8 @@ SET status = 'INGESTED';
 -- DELETE FROM evaluations;
 -- delete from items;
 
--- alter table items add digest_type TEXT DEFAULT "";
+-- alter table user add digest_type TEXT DEFAULT "";
 -- alter table items add column likes INTEGER DEFAULT 0;
 --     alter table items add column comments INTEGER DEFAULT 0;
 --     alter table items add column views INTEGER DEFAULT 0;
+
