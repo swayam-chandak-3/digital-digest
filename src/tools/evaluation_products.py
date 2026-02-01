@@ -17,9 +17,9 @@ from src.tools.db_utils import save_evaluation
 
 load_dotenv()
 
-DB_PATH = Path(os.getenv('DB_PATH', 'mydb.db'))
+DB_PATH = Path(os.getenv('DB_PATH', 'evalution.db'))
 
-PRODUCT_NEWS_MIN_REUSABILITY = 0.5
+PRODUCT_NEWS_MIN_REUSABILITY = float(os.getenv('PRODUCT_IDEAS_MIN_REUSABILITY', '0.5'))
 
 def summarize_by_textrank(text, top_n=5, language='english'):
     """
@@ -83,9 +83,9 @@ def _process_one_item(item, ollama_base_url, model, timeout, db_path, top_n_sent
 
 
 def run_evaluation_textrank_product_pipeline(
-    db_path=r'C:/Users/SwayamShivkumarChand/Desktop/Learning/Project/Daily Digest/daily-digest/digital-digest/src/models/mydb.db',
+    db_path=str(DB_PATH),
     ollama_base_url='http://localhost:11434',
-    model='llama3.1',
+    model='gemma3:12b',
     verbose=True,
     timeout=180,
     top_n_sentences=5,
@@ -130,11 +130,9 @@ def run_evaluation_textrank_product_pipeline(
                 continue
             
             score = float(evaluation.get('reusability_score', 0.0))
-            if score < PRODUCT_NEWS_MIN_REUSABILITY:
-                evaluation['decision'] = 'REJECT'
-                if verbose:
-                    print(f"    [REJECTED] Reusability {score:.2f} < {PRODUCT_NEWS_MIN_REUSABILITY}")
-                continue
+            evaluation['decision'] = 'KEEP' if score >= PRODUCT_NEWS_MIN_REUSABILITY else 'DROP'
+            if verbose and evaluation['decision'] == 'DROP':
+                print(f"    [DROP] Reusability {score:.2f} < {PRODUCT_NEWS_MIN_REUSABILITY}")
             
             # Save to evaluations table with evaluation_type='TEXTRANK_PRODUCT'
             if save_evaluation(item_id, evaluation, persona='PRODUCT_IDEAS', db_path=db_path, evaluation_type='TEXTRANK_PRODUCT'):
@@ -209,7 +207,7 @@ def get_items_for_evaluation(db_path='mydb.db'):
         conn.close()
 
 
-def evaluate_product_with_llm(title, content, url, ollama_base_url='http://localhost:11434', model='llama3.1', timeout=180, max_retries=2):
+def evaluate_product_with_llm(title, content, url, ollama_base_url='http://localhost:11434', model='gemma3:12b', timeout=180, max_retries=2):
     """Evaluate an article for PRODUCT news using LLM via Ollama API.
     
     Args:
@@ -224,15 +222,15 @@ def evaluate_product_with_llm(title, content, url, ollama_base_url='http://local
     Returns a dict with: idea_type, problem_statement, solution_summary, maturity_level, target_audience, topic, why_it_matters, reusability_score, decision
     """
     # Prepare the prompt for PRODUCT_IDEAS evaluation
-    prompt = f"""You are a technical news evaluator for AI/product engineers.
-Evaluate the following article for PRODUCT-related news and return JSON with:
-idea_type, problem_statement, solution_summary, maturity_level, target_audience(developer, manager or architect),
+    prompt = f"""You are evaluating Indie Hackers product stories for a product-ideas digest.
+Evaluate the post and return JSON with:
+idea_type, problem_statement, solution_summary, maturity_level, target_audience (developer|architect|manager),
 topic, why_it_matters, reusability_score (0-1), decision (KEEP|DROP).
 
 Scoring guidance:
-- Higher scores when the article describes a specific product, MVP, launch, or growth experiment,
-  with concrete signals (tech stack, pricing, traction, user outcomes).
-- Lower scores for generic founder stories without actionable product signals.
+- Higher scores when the post includes concrete product signals: MVP/launch details, tech stack,
+  pricing, traction, user outcomes, or distribution experiments.
+- Lower scores for generic founder stories without actionable product details.
 Decision rule: KEEP if reusability_score >= {PRODUCT_NEWS_MIN_REUSABILITY}, else DROP.
 
 Title: {title}
@@ -240,15 +238,15 @@ URL: {url}
 Content: {content[:2000] if content else 'No content available'}
 
 Provide a JSON response with the following fields:
-- idea_type: brief category (e.g., "SaaS Tool", "Mobile App", "AI Product", "Hardware")
+- idea_type: brief category (e.g., "SaaS Tool", "Mobile App", "AI Product", "Marketplace")
 - problem_statement: what problem does this solve (1-2 sentences)
 - solution_summary: how does the product solve it (1-2 sentences)
 - maturity_level: one of "concept", "mvp", "beta", "launched", "scaling"
 - target_audience: primary audience persona (one of "developer", "architect", or "manager")
-- topic: category or domain of this product (e.g., "Cloud Infrastructure", "AI/ML", "E-commerce")
-- why_it_matters: why is this product/idea important or relevant for the target audience (2-3 sentences)
-- reusability_score: float between 0.0 and 1.0 (how reusable/actionable are the insights?)
-- decision: "KEEP" or "DROP" (should this be included in the product digest?)
+- topic: category or domain (e.g., "Creator Tools", "AI/ML", "E-commerce", "DevTools")
+- why_it_matters: why this is relevant for builders (2-3 sentences)
+- reusability_score: float between 0.0 and 1.0
+- decision: "KEEP" or "DROP"
 
 Respond ONLY with valid JSON, no additional text."""
 
@@ -356,7 +354,7 @@ if __name__ == '__main__':
     )
     parser.add_argument('--db', type=str, default=DB_PATH, help='Database file path')
     parser.add_argument('--ollama-url', type=str, default='http://localhost:11434', help='Ollama base URL')
-    parser.add_argument('--model', type=str, default='llama3.1', help='Ollama model name')
+    parser.add_argument('--model', type=str, default='gemma3:12b', help='Ollama model name')
     parser.add_argument('--timeout', type=int, default=180, help='Request timeout in seconds')
     parser.add_argument('--top-n', type=int, default=5, help='Number of top TextRank sentences for summary (default: 5)')
     parser.add_argument('--quiet', action='store_true', help='Reduce verbose output')

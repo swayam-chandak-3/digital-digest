@@ -5,8 +5,12 @@ import re
 import sqlite3
 import time
 import requests
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+
+
+GENAI_NEWS_MIN_RELEVANCE = float(os.getenv('GENAI_NEWS_MIN_RELEVANCE', '0.6'))
 
 
 def evaluate_with_gemma3(title, content, url, ollama_base_url='http://localhost:11434', model='gemma3', timeout=180, max_retries=2):
@@ -103,9 +107,11 @@ Respond ONLY with valid JSON, no additional text."""
                 raise ValueError(f"Could not parse JSON from response: {response_text[:200]}")
         
         # Validate and normalize the response
+        relevance_score = float(evaluation.get('relevance_score', 0.0))
+        decision = 'KEEP' if relevance_score >= GENAI_NEWS_MIN_RELEVANCE else 'DROP'
         return {
-            'relevance_score': float(evaluation.get('relevance_score', 0.0)),
-            'decision': evaluation.get('decision', 'DROP').upper(),
+            'relevance_score': relevance_score,
+            'decision': decision,
             'topic': evaluation.get('topic', 'Unknown'),
             'why_it_matters': evaluation.get('why_it_matters', ''),
             'target_audience': evaluation.get('target_audience', 'developer'),

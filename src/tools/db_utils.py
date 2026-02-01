@@ -115,6 +115,7 @@ def _init_db(conn: sqlite3.Connection) -> None:
             raw_metadata JSON,
             ingestion_time DATETIME DEFAULT CURRENT_TIMESTAMP,
             status TEXT DEFAULT 'INGESTED',
+            digest_type TEXT,
             FOREIGN KEY (source_id) REFERENCES sources(id)
         );
         CREATE TABLE IF NOT EXISTS evaluations (
@@ -139,6 +140,19 @@ def _init_db(conn: sqlite3.Connection) -> None:
         );
         """
     )
+
+    # Backfill columns for older databases without newer fields.
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(items)")
+    existing_cols = {row[1] for row in cur.fetchall()}
+    required_cols = {
+        "digest_type": "digest_type TEXT",
+        "status": "status TEXT DEFAULT 'INGESTED'",
+        "ingestion_time": "ingestion_time DATETIME DEFAULT CURRENT_TIMESTAMP",
+    }
+    for col_name, col_def in required_cols.items():
+        if col_name not in existing_cols:
+            conn.execute(f"ALTER TABLE items ADD COLUMN {col_def}")
 
 
 def _get_or_create_source(conn: sqlite3.Connection, source: str) -> int:

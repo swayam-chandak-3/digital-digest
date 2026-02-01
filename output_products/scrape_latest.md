@@ -3,44 +3,44 @@
 ## Getting millions of impressions and hundreds of paying customers in 24 hours
 - URL: https://www.indiehackers.com/post/SdR5OmCKzyviysmrVbdn
 - Description: Rox Codes built a tool, partnered with the right creator, rebuilt it, and used the partnership to gain exposure. Here's how.
-- Likes: 15
-- Comments: 0
+- Likes: 30
+- Comments: 27
 
 ## Bootstrapping an investment bank to $100M+ deal volume
 - URL: https://www.indiehackers.com/post/77uHLwFJipCye4KymWvM
 - Description: Einar Vollset "fell into" M&A after he sold his first business. Now, his investment bank has a yearly deal flow of $100M+. Here's how.
-- Likes: 10
-- Comments: 0
+- Likes: 23
+- Comments: 12
 
 ## Building an app portfolio to $60k/mo after Apple froze his developer account
 - URL: https://www.indiehackers.com/post/LD7oNYzKSmWucRfKV1AO
 - Description: Viktor Seraleev built a mobile portfolio and got shut down by Apple. Then, he rebuilt it — now it's bringing in $60k/mo. Here's how.
-- Likes: 36
-- Comments: 0
+- Likes: 46
+- Comments: 41
 
 ## From open-source donations to $13k MRR product
 - URL: https://www.indiehackers.com/post/rl7FbRceFPj4ZvI0nGoV
 - Description: Andris Reinman built a well-known open-source product. Then, he built a new product, monetized it, and grew it to $13k MRR. Here's how.
-- Likes: 40
-- Comments: 0
+- Likes: 46
+- Comments: 44
 
 ## Building a product in 20 hours and growing it to a 5-figure ARR
 - URL: https://www.indiehackers.com/post/p1fyDKtYj5HMItJxV87H
 - Description: Val Sopi left his service company to pursue recurring revenue. Now, his first SaaS is at a 5-figure ARR. Here's how he did it.
-- Likes: 67
-- Comments: 0
+- Likes: 71
+- Comments: 100
 
 ## Taking the leap and building a 6-figure-ARR portfolio
 - URL: https://www.indiehackers.com/post/8Gc6h3b74cjmNEgOgY3L
 - Description: After nearly 10 years of not building, Pauline Clavelloux took the leap. Now, her portfolio of products is bringing in more than $100k/yr. Here's how.
-- Likes: 57
-- Comments: 0
+- Likes: 62
+- Comments: 40
 
 ## Validating via services before building a $27k MRR product
 - URL: https://www.indiehackers.com/post/7FrT6FXChPOiUK4PbXFp
 - Description: After a successful exit, Romàn Czerny built a tool using the growth tactic that had led to his success. Now, it's bringing in $27k MRR. Here's how.
-- Likes: 102
-- Comments: 0
+- Likes: 104
+- Comments: 152
 
 ## Getting an multi-million-dollar foothold in a crowded market
 - URL: https://www.indiehackers.com/post/IKfGcwhlcGQDnjExin8A

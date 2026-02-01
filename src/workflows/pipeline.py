@@ -21,7 +21,16 @@ from ..tools.db_utils import save_items_to_db, categorize_article
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-DB_PATH = Path(os.getenv('DB_PATH', 'mydb.db'))
+DB_PATH = Path(os.getenv('DB_PATH', 'evalution.db'))
+
+# Reddit defaults
+REDDIT_TIME_WINDOW_HOURS = int(os.getenv('REDDIT_TIME_WINDOW_HOURS', '24'))
+REDDIT_LIMIT_PER_SUBREDDIT = int(os.getenv('REDDIT_LIMIT_PER_SUBREDDIT', '20'))
+REDDIT_LISTING_PAGE_LIMIT = int(os.getenv('REDDIT_LISTING_PAGE_LIMIT', '100'))
+REDDIT_SUBREDDITS = [
+    s.strip() for s in os.getenv('REDDIT_SUBREDDITS', 'LocalLLaMA,MachineLearning,artificial').split(',')
+    if s.strip()
+]
 
 TECH_URL = "https://www.indiehackers.com/tech"
 AI_TAG_URL = "https://www.indiehackers.com/tags/artificial-intelligence"
@@ -114,6 +123,143 @@ def _extract_metadata(soup):
             publish_datetime = time_elem['datetime'].strip()
 
     return author, publish_datetime
+
+
+def collect_reddit_posts(
+    subreddits: List[str],
+    hours_window: int = REDDIT_TIME_WINDOW_HOURS,
+    limit_per_subreddit: int = REDDIT_LIMIT_PER_SUBREDDIT,
+    listing_limit: int = REDDIT_LISTING_PAGE_LIMIT,
+    verbose: bool = False,
+) -> List[Dict[str, object]]:
+    """Collect recent Reddit posts from a list of subreddits."""
+    if not subreddits:
+        return []
+    headers = {
+        "User-Agent": "digital-digest/1.0 (reddit scraper)"
+    }
+    cutoff_ts = datetime.now(timezone.utc).timestamp() - hours_window * 3600
+    collected: List[Dict[str, object]] = []
+
+    for subreddit in subreddits:
+        url = f"https://www.reddit.com/r/{subreddit}/new.json?limit={listing_limit}"
+        if verbose:
+            print(f"Fetching Reddit /r/{subreddit}...")
+        try:
+            resp = requests.get(url, headers=headers, timeout=20)
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as e:
+            if verbose:
+                print(f"  [ERROR] /r/{subreddit}: {e}")
+            continue
+
+        children = payload.get("data", {}).get("children", [])
+        for child in children:
+            data = child.get("data", {})
+            if data.get("stickied"):
+                continue
+            created_utc = data.get("created_utc") or 0
+            if created_utc and created_utc < cutoff_ts:
+                continue
+            collected.append({
+                "subreddit": subreddit,
+                "title": data.get("title") or "",
+                "url": data.get("url") or data.get("permalink") or "",
+                "permalink": f"https://www.reddit.com{data.get('permalink', '')}",
+                "selftext": data.get("selftext") or "",
+                "score": int(data.get("score") or 0),
+                "num_comments": int(data.get("num_comments") or 0),
+                "created_utc": created_utc,
+                "author": data.get("author"),
+            })
+            if len([p for p in collected if p.get("subreddit") == subreddit]) >= limit_per_subreddit:
+                break
+
+    return collected
+
+
+def reddit_posts_to_items(posts: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    """Convert Reddit posts to item dicts compatible with save_items_to_db."""
+    items: List[Dict[str, object]] = []
+    for post in posts:
+        url = post.get("url") or post.get("permalink")
+        title = post.get("title") or "Untitled"
+        text = post.get("selftext") or ""
+        created_utc = post.get("created_utc") or None
+        publish_datetime = None
+        if created_utc:
+            publish_datetime = datetime.fromtimestamp(created_utc, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+        categories = categorize_article(
+            text,
+            title,
+            "reddit.com",
+            news_type=['LLM/AI', 'Programming/Software']
+        )
+
+        items.append({
+            "link": url,
+            "author": post.get("author"),
+            "title": title,
+            "source": "reddit",
+            "content": text,
+            "publish_datetime": publish_datetime,
+            "scraping_timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "domain": "reddit.com",
+            "categories": categories,
+            "primary_category": categories[0] if categories else "Uncategorized",
+            "points": post.get("score", 0),
+            "num_comments": post.get("num_comments", 0),
+            "engagement_score": float((post.get("score") or 0) + 2 * (post.get("num_comments") or 0)),
+            "raw": post,
+        })
+    return items
+
+
+def run_reddit_pipeline(
+    subreddits: List[str] = None,
+    hours_window: int = REDDIT_TIME_WINDOW_HOURS,
+    limit_per_subreddit: int = REDDIT_LIMIT_PER_SUBREDDIT,
+    listing_page_limit: int = REDDIT_LISTING_PAGE_LIMIT,
+    output_dir: str = "output_reddit",
+    verbose: bool = True,
+    persist_to_db: bool = True,
+    db_path: Path = DB_PATH,
+) -> str:
+    """Run Reddit scraping, save JSON, and persist to DB."""
+    print("=" * 60)
+    print("REDDIT PIPELINE")
+    print("=" * 60)
+
+    subs = subreddits or REDDIT_SUBREDDITS
+    print(f"\nStep 1: Scraping Reddit ({', '.join(subs)})...")
+    posts = collect_reddit_posts(
+        subs,
+        hours_window=hours_window,
+        limit_per_subreddit=limit_per_subreddit,
+        listing_limit=listing_page_limit,
+        verbose=verbose,
+    )
+    print(f"[OK] Collected {len(posts)} posts from Reddit")
+    if not posts:
+        return ""
+
+    items = reddit_posts_to_items(posts)
+
+    print("\nStep 2: Saving Reddit JSON...")
+    os.makedirs(output_dir, exist_ok=True)
+    json_path = os.path.join(output_dir, "reddit_latest.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(items, f, ensure_ascii=False, indent=2)
+    print(f"[OK] Saved outputs to: {json_path}")
+
+    if persist_to_db:
+        print("\nStep 3: Writing Reddit items to database...")
+        inserted = save_items_to_db(items, db_path=str(db_path), digest_type="GENAI")
+        print(f"[OK] Inserted {inserted} rows into items table")
+
+    return json_path
 
 
 @dataclass
@@ -253,9 +399,9 @@ def _extract_post_content(html_text: str) -> Optional[str]:
     return "\n".join(lines)
 
 
-def _extract_likes_and_comments_from_detail_page(html: str) -> Tuple[int, int]:
-    likes_count = 0
-    comments_count = 0
+def _extract_likes_and_comments_from_detail_page(html: str) -> Tuple[Optional[int], Optional[int]]:
+    likes_count: Optional[int] = None
+    comments_count: Optional[int] = None
 
     likes_match = LIKES_COUNT_RE.search(html)
     if not likes_match:
@@ -265,24 +411,24 @@ def _extract_likes_and_comments_from_detail_page(html: str) -> Tuple[int, int]:
         try:
             likes_count = int(likes_match.group(1))
         except (ValueError, IndexError):
-            likes_count = 0
+            likes_count = None
 
     comments_match = JSON_COMMENTS_RE.search(html)
     if comments_match:
         try:
             comments_count = int(comments_match.group(1))
         except (ValueError, IndexError):
-            comments_count = 0
+            comments_count = None
 
     return likes_count, comments_count
 
 
-def _parse_entry_detail(url: str) -> Tuple[Optional[str], Optional[str], Optional[str], int, int]:
+def _parse_entry_detail(url: str) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int], Optional[int]]:
     try:
         html = _fetch_html(url)
     except Exception as e:
         print(f"Failed to fetch {url}: {e}")
-        return None, None, None, 0, 0
+        return None, None, None, None, None
 
     title = None
     description = None
@@ -305,6 +451,76 @@ def _parse_entry_detail(url: str) -> Tuple[Optional[str], Optional[str], Optiona
     likes_count, comments_count = _extract_likes_and_comments_from_detail_page(html)
 
     return title, description, content, likes_count, comments_count
+
+
+def _extract_comments_from_html(html_text: str) -> Optional[int]:
+    soup = BeautifulSoup(html_text, "html.parser")
+    comments_div = soup.find("div", class_="portal-entry__comments")
+    if not comments_div:
+        return None
+    span = comments_div.find("span")
+    if not span:
+        return None
+    count_text = span.get_text(strip=True)
+    if not count_text.isdigit():
+        return None
+    return int(count_text)
+
+
+def _extract_comments_from_json(html_text: str, slug: str) -> Optional[int]:
+    soup = BeautifulSoup(html_text, "html.parser")
+    for link in soup.find_all("a"):
+        text = link.get_text(strip=True)
+        if "comments" not in text.lower():
+            continue
+        href = link.get("href") or ""
+        if slug not in href:
+            continue
+        number_match = re.search(r"(\d+)\s*comments", text, re.IGNORECASE)
+        if number_match:
+            return int(number_match.group(1))
+    return None
+
+
+def _fetch_comments_from_json_page(full_url: str, slug: str) -> Optional[int]:
+    try:
+        html = _fetch_html(f"{full_url}.json")
+    except Exception:
+        return None
+
+    soup_comments = _extract_comments_from_json(html, slug)
+    if soup_comments is not None:
+        return soup_comments
+
+    pattern = re.compile(
+        rf'\[(\d+)\s+comments\]\([^\)]*{re.escape(slug)}[^\)]*\)',
+        re.IGNORECASE,
+    )
+    match = pattern.search(html)
+    if not match:
+        pattern = re.compile(
+            rf'\[(\d+)\s+comments\]\([^\)]*{re.escape(full_url)}[^\)]*\)',
+            re.IGNORECASE,
+        )
+        match = pattern.search(html)
+    if not match:
+        pattern = re.compile(
+            rf'(\d+)\s+comments[\s\S]*?{re.escape(slug)}',
+            re.IGNORECASE,
+        )
+        match = pattern.search(html)
+    if not match:
+        pattern = re.compile(
+            rf'<a[^>]+href="[^"]*{re.escape(slug)}[^"]*"[^>]*>\s*(\d+)\s+comments\s*</a>',
+            re.IGNORECASE,
+        )
+        match = pattern.search(html)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
+    return None
 
 
 def _extract_published_at(html_text: str) -> datetime:
@@ -335,21 +551,37 @@ def _parse_entries(
         summary_html = SUMMARY_RE.search(body).group(1) if SUMMARY_RE.search(body) else None
         byline = _strip(BYLINE_RE.search(body).group(1)) if BYLINE_RE.search(body) else None
 
+        comments: Optional[int] = None
         comments_match = COMMENTS_RE.search(body)
-        listing_comments = 0
         if comments_match:
             try:
-                listing_comments = int(comments_match.group(1))
+                comments = int(comments_match.group(1))
             except ValueError:
-                listing_comments = 0
+                comments = None
 
-        if listing_comments == 0:
+        if comments is None:
+            soup_comments = _extract_comments_from_html(body)
+            if soup_comments is not None:
+                comments = soup_comments
+
+        if comments is None:
             text_match = COMMENTS_TEXT_RE.search(body)
             if text_match:
                 try:
-                    listing_comments = int(text_match.group(1))
+                    comments = int(text_match.group(1))
                 except ValueError:
-                    listing_comments = 0
+                    comments = None
+
+        if comments is None:
+            idx = page_html.find(href)
+            if idx != -1:
+                window = page_html[idx: idx + 2500]
+                window_match = COMMENTS_RE.search(window) or COMMENTS_TEXT_RE.search(window)
+                if window_match:
+                    try:
+                        comments = int(window_match.group(1))
+                    except ValueError:
+                        comments = None
 
         image = IMAGE_RE.search(body).group(1) if IMAGE_RE.search(body) else None
 
@@ -360,13 +592,19 @@ def _parse_entries(
             continue
 
         full_url = f"https://www.indiehackers.com{href}"
+        slug = href.strip("/").split("/")[-1]
 
         detail_title, detail_desc, detail_content, detail_likes, detail_comments = _parse_entry_detail(full_url)
 
-        final_comments = detail_comments if detail_comments > 0 else listing_comments
-        final_likes = detail_likes
+        if comments is None and detail_comments is not None:
+            comments = detail_comments
+        if comments is None:
+            json_comments = _fetch_comments_from_json_page(full_url, slug)
+            if json_comments is not None:
+                comments = json_comments
 
-        print(f"[DEBUG] {title[:50]}... - Likes: {final_likes}, Comments: {final_comments}")
+        final_comments = comments if comments is not None else 0
+        final_likes = detail_likes if detail_likes is not None else 0
 
         categories = categorize_article(
             detail_content or detail_desc or summary or "",
@@ -395,7 +633,6 @@ def _parse_entries(
                     "likes": final_likes,
                     "image": image,
                     "summary": summary,
-                    "listing_comments": listing_comments,
                     "detail_comments": detail_comments,
                     "detail_likes": detail_likes,
                     "categories": categories,
@@ -449,9 +686,8 @@ def _prefilter(items: List[IngestedItem], keywords: List[str], min_engagement: i
 
 def _write_outputs(outputs_dir: str, title: str, items: List[IngestedItem]) -> str:
     os.makedirs(outputs_dir, exist_ok=True)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    json_path = os.path.join(outputs_dir, f"scrape_{ts}.json")
-    md_path = os.path.join(outputs_dir, f"scrape_{ts}.md")
+    json_path = os.path.join(outputs_dir, "scrape_latest.json")
+    md_path = os.path.join(outputs_dir, "scrape_latest.md")
 
     payload = [item.as_json() for item in items]
     with open(json_path, "w", encoding="utf-8") as f:
@@ -1039,6 +1275,17 @@ if __name__ == '__main__':
     parser.add_argument('--ollama-url', type=str, default='http://localhost:11434', help='Ollama base URL')
     parser.add_argument('--model', type=str, default='gemma3:12b', help='Ollama model name')
     parser.add_argument('--hours', type=int, default=24, help='Hours to look back for recent items')
+    parser.add_argument('--no-reddit', action='store_true', help='Skip Reddit scraper')
+    parser.add_argument('--reddit-output-dir', type=str, default='output_reddit', help='Output directory for Reddit JSON')
+    parser.add_argument('--reddit-hours-window', type=int, default=REDDIT_TIME_WINDOW_HOURS,
+                       help='Reddit: only items from last N hours')
+    parser.add_argument('--reddit-limit', type=int, default=REDDIT_LIMIT_PER_SUBREDDIT,
+                       help='Reddit: limit posts per subreddit')
+    parser.add_argument('--reddit-listing-limit', type=int, default=REDDIT_LISTING_PAGE_LIMIT,
+                       help='Reddit: listing page limit')
+    parser.add_argument('--reddit-subreddits', type=str, default=",".join(REDDIT_SUBREDDITS),
+                       help='Reddit: comma-separated subreddit list')
+    parser.add_argument('--reddit-no-db', action='store_true', help='Skip saving Reddit posts to database')
     
     args = parser.parse_args()
     
@@ -1053,6 +1300,19 @@ if __name__ == '__main__':
         )
     else:
         env = _load_env()
+
+        if not args.no_reddit:
+            subreddits = [s.strip() for s in (args.reddit_subreddits or "").split(",") if s.strip()]
+            run_reddit_pipeline(
+                subreddits=subreddits,
+                hours_window=args.reddit_hours_window,
+                limit_per_subreddit=args.reddit_limit,
+                listing_page_limit=args.reddit_listing_limit,
+                output_dir=args.reddit_output_dir,
+                verbose=not args.quiet,
+                persist_to_db=not args.reddit_no_db,
+                db_path=DB_PATH,
+            )
 
         if args.pipeline in {'hackernews', 'both'}:
             run_pipeline(
@@ -1084,13 +1344,12 @@ if __name__ == '__main__':
                 verbose=not args.quiet
             )
         
-        # Optionally run evaluation after ingestion
-        if args.evaluate:
-            print("\n" + "=" * 60)
-            run_evaluation_pipeline(
-                db_path=DB_PATH,
-                ollama_base_url=args.ollama_url,
-                model=args.model,
-                hours=args.hours,
-                verbose=not args.quiet
-            )
+        # Run evaluation after ingestion
+        print("\n" + "=" * 60)
+        run_evaluation_pipeline(
+            db_path=DB_PATH,
+            ollama_base_url=args.ollama_url,
+            model=args.model,
+            hours=args.hours,
+            verbose=not args.quiet
+        )
