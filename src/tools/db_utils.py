@@ -115,6 +115,7 @@ def _init_db(conn: sqlite3.Connection) -> None:
             raw_metadata JSON,
             ingestion_time DATETIME DEFAULT CURRENT_TIMESTAMP,
             status TEXT DEFAULT 'INGESTED',
+            digest_type TEXT DEFAULT '',
             FOREIGN KEY (source_id) REFERENCES sources(id)
         );
         CREATE TABLE IF NOT EXISTS evaluations (

@@ -115,10 +115,10 @@
 -- delete from embeddings;
 -- delete from dedup_item_cluster;
 -- delete from dedup_clusters;
--- delete from items;
+delete from items;
 
-UPDATE items
-SET status = 'INGESTED';
+-- UPDATE items
+-- SET status = 'INGESTED';
 
 -- Add summary column to items if it does not exist (run once on existing DBs):
 -- ALTER TABLE items ADD COLUMN summary TEXT;

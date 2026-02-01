@@ -6,6 +6,7 @@ import requests
 import time
 import re
 import json
+from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 load_dotenv()
 from urllib.parse import urlparse
@@ -13,7 +14,15 @@ from bs4 import BeautifulSoup
 from readability import Document
 from datetime import datetime, timezone, timedelta
 from ..tools.helper import _evaluate_one_item, get_items_for_evaluation, save_evaluation
-from ..tools.db_utils import save_items_to_db, categorize_article
+from ..tools.db_utils import save_items_to_db, categorize_article, TOPIC_KEYWORDS
+from .reddit_scraper import (
+    run_reddit_pipeline,
+    collect_reddit_posts,
+    reddit_posts_to_items,
+    REDDIT_TIME_WINDOW_HOURS,
+    REDDIT_LIMIT_PER_SUBREDDIT,
+    REDDIT_LISTING_PAGE_LIMIT,
+)
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -549,6 +558,16 @@ if __name__ == '__main__':
     parser.add_argument('--ollama-url', type=str, default='http://localhost:11434', help='Ollama base URL')
     parser.add_argument('--model', type=str, default='gemma3:12b', help='Ollama model name')
     parser.add_argument('--hours', type=int, default=24, help='Hours to look back for recent items')
+    parser.add_argument('--no-reddit', action='store_true', help='Skip Reddit JSON scraper (by default Reddit runs)')
+    parser.add_argument('--no-hackernews', action='store_true', help='Skip Hacker News scraper (by default HN runs)')
+    parser.add_argument('--reddit-output-dir', type=str, default='output', help='Output directory for Reddit JSON files')
+    parser.add_argument('--reddit-hours-window', type=int, default=REDDIT_TIME_WINDOW_HOURS,
+                       help='Reddit: only items from last N hours (default: 24)')
+    parser.add_argument('--reddit-limit', type=int, default=REDDIT_LIMIT_PER_SUBREDDIT,
+                       help='Reddit: limit posts per subreddit (default: 20)')
+    parser.add_argument('--reddit-listing-limit', type=int, default=REDDIT_LISTING_PAGE_LIMIT,
+                       help='Reddit: listing page limit (default: 100)')
+    parser.add_argument('--reddit-no-db', action='store_true', help='Skip saving Reddit posts to database')
     
     args = parser.parse_args()
     
@@ -562,16 +581,29 @@ if __name__ == '__main__':
             verbose=not args.quiet
         )
     else:
-        # Run ingestion pipeline
-        run_pipeline(
-            num_pages=min(args.pages, 20),
-            delay=args.delay,
-            verbose=not args.quiet,
-            output_file=args.output,
-            hours_window=args.hours_window,
-            min_points=args.min_points,
-            min_comments=args.min_comments,
-        )
+        # By default, run both Reddit and Hacker News pipelines
+        if not args.no_reddit:
+            run_reddit_pipeline(
+                output_dir=args.reddit_output_dir,
+                hours_window=args.reddit_hours_window,
+                limit_per_subreddit=args.reddit_limit,
+                listing_page_limit=args.reddit_listing_limit,
+                verbose=not args.quiet,
+                persist_to_db=not args.reddit_no_db,
+                db_path=DB_PATH,
+            )
+
+        if not args.no_hackernews:
+            # Run Hacker News ingestion pipeline
+            run_pipeline(
+                num_pages=min(args.pages, 20),
+                delay=args.delay,
+                verbose=not args.quiet,
+                output_file=args.output,
+                hours_window=args.hours_window,
+                min_points=args.min_points,
+                min_comments=args.min_comments,
+            )
         
         # Optionally run evaluation after ingestion
         if args.evaluate:
