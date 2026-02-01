@@ -20,6 +20,7 @@ from ..tools.helper import _evaluate_one_item, get_items_for_evaluation, save_ev
 from ..tools.db_utils import save_items_to_db, categorize_article
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from .scrape import run_pipeline as run_scrape_pipeline
 
 DB_PATH = Path(os.getenv('DB_PATH', 'evalution.db'))
 
@@ -1345,11 +1346,16 @@ if __name__ == '__main__':
             )
         
         # Run evaluation after ingestion
-        print("\n" + "=" * 60)
-        run_evaluation_pipeline(
-            db_path=DB_PATH,
-            ollama_base_url=args.ollama_url,
-            model=args.model,
-            hours=args.hours,
+        # print("\n" + "=" * 60)
+        # run_evaluation_pipeline(
+        #     db_path=DB_PATH,
+        #     ollama_base_url=args.ollama_url,
+        #     model=args.model,
+        #     hours=args.hours,
+        #     verbose=not args.quiet
+        # )
+
+        # Run scrape pipeline for articles
+        run_scrape_pipeline(
             verbose=not args.quiet
         )

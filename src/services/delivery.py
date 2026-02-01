@@ -10,6 +10,7 @@ import os
 import json
 from pathlib import Path
 import smtplib
+import sqlite3
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timezone
@@ -30,6 +31,70 @@ DEFAULT_SOURCE = SUMMARY_SOURCE
 
 def _env(key, default=None):
     return os.environ.get(key, default)
+
+
+def get_users_with_preferences(db_path):
+    """
+    Fetch all users from the database with their preferences.
+    Returns a list of dicts: {
+        'user_id': int,
+        'name': str,
+        'emailid': str,
+        'telegramid': str,
+        'preference_id': int,
+        'news_type': str  (e.g., 'GENAI', 'PRODUCT')
+    }
+    """
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        query = """
+            SELECT 
+                u.id as user_id,
+                u.name,
+                u.emailid,
+                u.telegramid,
+                p.id as preference_id,
+                p.news_type
+            FROM users u
+            LEFT JOIN preference p ON u.topic_preference = p.id
+            ORDER BY u.id
+        """
+        
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        conn.close()
+        
+        users = []
+        for row in rows:
+            users.append({
+                'user_id': row['user_id'],
+                'name': row['name'],
+                'emailid': row['emailid'],
+                'telegramid': row['telegramid'],
+                'preference_id': row['preference_id'],
+                'news_type': row['news_type']
+            })
+        print(users)
+        return users
+    except Exception as e:
+        print(f"[Delivery] Failed to fetch users: {e}")
+        return []
+
+
+def filter_entries_by_news_type(entries, news_type):
+    """
+    Filter entries to match a specific news type.
+    news_type: str like 'GENAI' or 'PRODUCT'
+    Returns: list of filtered entries
+    """
+    if not news_type:
+        return entries
+    
+    filtered = [e for e in entries if e.get('digest_type', 'GENAI').upper() == news_type.upper()]
+    return filtered
 
 
 def get_delivery_config(persona="GENAI_NEWS"):
@@ -351,22 +416,31 @@ def send_email(html_content, subject, to_address, config, verbose=True):
 async def _send_telegram_async(messages, chat_id, bot_token, verbose=True):
     """Send multiple messages via python-telegram-bot (Bot API). Uses MarkdownV2 parse_mode."""
     from telegram import Bot
+    from telegram.error import BadRequest
 
     bot = Bot(token=bot_token.strip())
     chat_id_str = str(chat_id).strip()
 
     # Send each message
     for i, message_text in enumerate(messages, 1):
-        await bot.send_message(
-            chat_id=chat_id_str,
-            text=message_text,
-            parse_mode="MarkdownV2",
-            disable_web_page_preview=True,
-        )
-        if verbose and len(messages) > 1:
-            print(f"[Delivery] Telegram message {i}/{len(messages)} sent ({len(message_text)} chars)")
-        elif verbose:
-            print(f"[Delivery] Telegram message sent ({len(message_text)} chars)")
+        try:
+            await bot.send_message(
+                chat_id=chat_id_str,
+                text=message_text,
+                parse_mode="MarkdownV2",
+                disable_web_page_preview=True,
+            )
+            if verbose and len(messages) > 1:
+                print(f"[Delivery] Telegram message {i}/{len(messages)} sent ({len(message_text)} chars)")
+            elif verbose:
+                print(f"[Delivery] Telegram message sent ({len(message_text)} chars)")
+        except BadRequest as e:
+            if "Chat not found" in str(e):
+                if verbose:
+                    print(f"[Delivery] Telegram Chat not found for chat_id: {chat_id_str}")
+                    print(f"[Delivery] Make sure the user has started a /start conversation with the bot.")
+                    print(f"[Delivery] Or verify that chat_id '{chat_id_str}' is correct in the database.")
+            raise
 
 
 def send_telegram(messages, chat_id, bot_token, verbose=True):
@@ -375,9 +449,17 @@ def send_telegram(messages, chat_id, bot_token, verbose=True):
     Uses MarkdownV2 parse_mode. Sends multiple messages if needed, ensuring no entry is split.
     messages: list of message texts or single string
     """
-    if not bot_token or not chat_id or not str(chat_id).strip():
+    chat_id_str = str(chat_id).strip() if chat_id else ""
+    bot_token_str = str(bot_token).strip() if bot_token else ""
+    
+    if not bot_token_str:
         if verbose:
-            print("[Delivery] Skipping Telegram: no TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID set.")
+            print("[Delivery] Skipping Telegram: no TELEGRAM_BOT_TOKEN set.")
+        return False
+    
+    if not chat_id_str:
+        if verbose:
+            print(f"[Delivery] Skipping Telegram: no TELEGRAM_CHAT_ID set for this recipient.")
         return False
     
     # Convert single string to list
@@ -386,26 +468,41 @@ def send_telegram(messages, chat_id, bot_token, verbose=True):
     
     try:
         import asyncio
-        asyncio.run(_send_telegram_async(messages, chat_id, bot_token, verbose=verbose))
+        asyncio.run(_send_telegram_async(messages, chat_id_str, bot_token_str, verbose=verbose))
         return True
     except Exception as e:
         if verbose:
-            print(f"[Delivery] Telegram failed: {e}")
+            error_str = str(e)
+            if "Chat not found" in error_str:
+                print(f"[Delivery] ❌ Telegram delivery failed for chat_id '{chat_id_str}'")
+                print(f"[Delivery] Reason: Chat not found")
+                print(f"[Delivery] Solutions:")
+                print(f"[Delivery]   1. User must send /start to the bot first")
+                print(f"[Delivery]   2. Verify the chat_id '{chat_id_str}' is correct in the users table")
+                print(f"[Delivery]   3. Check that the bot token belongs to the correct bot")
+            else:
+                print(f"[Delivery] ❌ Telegram failed for chat_id {chat_id_str}: {error_str}")
         return False
 
 
 def run_delivery(
     persona="GENAI_NEWS",
-    db_path="mydb.db",
+    db_path=DB_PATH,
     source=None,
     output_dir="output",
     verbose=True,
     separate_by_type=True,
+    use_user_preferences=False,
 ):
     """
     Load digest entries, write JSON + Markdown files (always), then send via
     channels configured for this persona (email, telegram).
     Entries are sorted by total engagement (likes + comments) in descending order.
+    
+    If use_user_preferences=True:
+    - Load all users from the database with their preferences
+    - For each user, filter entries by their preference (news_type)
+    - Send personalized digests to each user via their email/telegram
     
     If separate_by_type=True:
     - Separates GENAI and PRODUCT entries
@@ -433,6 +530,75 @@ def run_delivery(
     if verbose:
         print(f"[Delivery] Fallback files: {json_path}, {md_path}")
 
+    # If using user preferences, send personalized digests
+    if use_user_preferences:
+        users = get_users_with_preferences(db_path)
+        if not users:
+            if verbose:
+                print("[Delivery] No users found in database")
+            return {"entries": len(entries), "json_path": json_path, "md_path": md_path, "users": 0}
+        
+        channels = config["channels"]
+        sent_count = 0
+        
+        for user in users:
+            user_id = user['user_id']
+            name = user['name']
+            emailid = user['emailid']
+            telegramid = user['telegramid']
+            news_type = user['news_type']
+            
+            if verbose:
+                print(f"\n[Delivery] Processing user {user_id} ({name}) - preference: {news_type}")
+            
+            # Filter entries by user's news type preference
+            user_entries = filter_entries_by_news_type(entries, news_type)
+            
+            if not user_entries:
+                if verbose:
+                    print(f"  → No entries matching preference '{news_type}'")
+                continue
+            
+            user_title = f"{title} - {name}"
+            
+            # Email
+            if "email" in channels and emailid and emailid.strip():
+                html = build_digest_html(user_entries, title=user_title)
+                subject = f"{user_title} — {len(user_entries)} items"
+                send_email(
+                    html,
+                    subject=subject,
+                    to_address=emailid,
+                    config=config,
+                    verbose=verbose,
+                )
+                sent_count += 1
+            
+            # Telegram
+            if "telegram" in channels and telegramid and telegramid.strip():
+                md_telegram_messages = build_digest_messages(
+                    user_entries, 
+                    title=user_title, 
+                    escape_for_telegram=True,
+                    separate_by_type=separate_by_type
+                )
+                send_telegram(
+                    md_telegram_messages,
+                    chat_id=telegramid,
+                    bot_token=config["telegram_bot_token"],
+                    verbose=verbose,
+                )
+                sent_count += 1
+        
+        return {
+            "entries": len(entries),
+            "json_path": json_path,
+            "md_path": md_path,
+            "users": len(users),
+            "sent": sent_count
+        }
+    
+    # Default behavior: send to configured email/telegram
     channels = config["channels"]
     html = build_digest_html(entries, title=title)
     md_telegram_messages = build_digest_messages(
@@ -469,10 +635,11 @@ if __name__ == "__main__":
     import argparse
     p = argparse.ArgumentParser(description="Deliver digest via email, Telegram, and file fallback")
     p.add_argument("--persona", default="GENAI_NEWS", help="Persona for channel config (e.g. GENAI_NEWS_DELIVERY)")
-    p.add_argument("--db", default="mydb.db", help="Database path")
+    p.add_argument("--db", default=DB_PATH, help="Database path")
     p.add_argument("--source", default=None, help="item_summaries source (default: TEXTRANK)")
     p.add_argument("--output-dir", default="output", help="Directory for JSON/MD fallback files")
     p.add_argument("--no-separate-types", action="store_true", help="Don't separate GENAI and PRODUCT entries")
+    p.add_argument("--no-user-preferences", action="store_true", help="Disable personalized digests (send to env config instead)")
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args()
     run_delivery(
@@ -482,4 +649,5 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         verbose=not args.quiet,
         separate_by_type=not args.no_separate_types,
+        use_user_preferences=not args.no_user_preferences,
     )

@@ -15,6 +15,7 @@ import json
 import re
 from dotenv import load_dotenv
 from .db_utils import save_evaluation
+from .evaluation_products import run_evaluation_textrank_product_pipeline
 
 load_dotenv()
 
@@ -344,6 +345,16 @@ if __name__ == '__main__':
         ollama_base_url=args.ollama_url,
         model=args.model,
         hours=args.hours,
+        verbose=not args.quiet,
+        timeout=args.timeout,
+        top_n_sentences=args.top_n,
+    )
+
+    # Call evaluation_products
+    run_evaluation_textrank_product_pipeline(
+        db_path=args.db,
+        ollama_base_url=args.ollama_url,
+        model=args.model,
         verbose=not args.quiet,
         timeout=args.timeout,
         top_n_sentences=args.top_n,
