@@ -43,7 +43,7 @@ Bot name: `@DailyDigestEpamBot`
 - Telegram delivery
 
 ## Notes
-- Telegram bot token and recipient ID are currently **hardcoded** because a UI for configuration has not been implemented yet.
+- Telegram recipient ID are currently **hardcoded** because a UI for configuration has not been implemented yet.
 
 ## Setup
 Install dependencies:
