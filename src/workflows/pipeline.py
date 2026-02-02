@@ -29,7 +29,7 @@ REDDIT_TIME_WINDOW_HOURS = int(os.getenv('REDDIT_TIME_WINDOW_HOURS', '24'))
 REDDIT_LIMIT_PER_SUBREDDIT = int(os.getenv('REDDIT_LIMIT_PER_SUBREDDIT', '20'))
 REDDIT_LISTING_PAGE_LIMIT = int(os.getenv('REDDIT_LISTING_PAGE_LIMIT', '100'))
 REDDIT_SUBREDDITS = [
-    s.strip() for s in os.getenv('REDDIT_SUBREDDITS', 'LocalLLaMA,MachineLearning,artificial').split(',')
+    s.strip() for s in os.getenv('REDDIT_SUBREDDITS', 'LocalLLaMA,MachineLearning,artificial, SideProject').split(',')
     if s.strip()
 ]
 
@@ -213,6 +213,7 @@ def reddit_posts_to_items(posts: List[Dict[str, object]]) -> List[Dict[str, obje
             "points": post.get("score", 0),
             "num_comments": post.get("num_comments", 0),
             "engagement_score": float((post.get("score") or 0) + 2 * (post.get("num_comments") or 0)),
+            "subreddit": post.get("subreddit"),
             "raw": post,
         })
     return items
@@ -257,8 +258,23 @@ def run_reddit_pipeline(
 
     if persist_to_db:
         print("\nStep 3: Writing Reddit items to database...")
-        inserted = save_items_to_db(items, db_path=str(db_path), digest_type="GENAI")
-        print(f"[OK] Inserted {inserted} rows into items table")
+        # Separate items by subreddit: sideproject -> PROJECT, others -> GENAI
+        sideproject_items = [item for item in items if item.get("subreddit", "").lower() == "sideproject"]
+        other_items = [item for item in items if item.get("subreddit", "").lower() != "sideproject"]
+        
+        total_inserted = 0
+        if sideproject_items:
+            inserted = save_items_to_db(sideproject_items, db_path=str(db_path), digest_type="PROJECT")
+            total_inserted += inserted
+            if verbose:
+                print(f"  [PROJECT] Inserted {inserted} items from sideproject")
+        if other_items:
+            inserted = save_items_to_db(other_items, db_path=str(db_path), digest_type="GENAI")
+            total_inserted += inserted
+            if verbose:
+                print(f"  [GENAI] Inserted {inserted} items from other subreddits")
+        
+        print(f"[OK] Inserted {total_inserted} rows into items table")
 
     return json_path
 
@@ -1277,7 +1293,7 @@ if __name__ == '__main__':
     parser.add_argument('--model', type=str, default='gemma3:12b', help='Ollama model name')
     parser.add_argument('--hours', type=int, default=24, help='Hours to look back for recent items')
     parser.add_argument('--no-reddit', action='store_true', help='Skip Reddit scraper')
-    parser.add_argument('--reddit-output-dir', type=str, default='output/output_reddit', help='Output directory for Reddit JSON')
+    parser.add_argument('--reddit-output-dir', type=str, default='output\output_reddit', help='Output directory for Reddit JSON')
     parser.add_argument('--reddit-hours-window', type=int, default=REDDIT_TIME_WINDOW_HOURS,
                        help='Reddit: only items from last N hours')
     parser.add_argument('--reddit-limit', type=int, default=REDDIT_LIMIT_PER_SUBREDDIT,
