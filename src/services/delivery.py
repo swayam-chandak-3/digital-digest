@@ -77,7 +77,6 @@ def get_users_with_preferences(db_path):
                 'preference_id': row['preference_id'],
                 'news_type': row['news_type']
             })
-        print(users)
         return users
     except Exception as e:
         print(f"[Delivery] Failed to fetch users: {e}")

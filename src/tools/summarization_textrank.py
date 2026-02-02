@@ -245,7 +245,7 @@ def get_digest_entries(db_path):
                 i.url,
                 COALESCE(i.likes, 0) AS likes,
                 COALESCE(i.comments, 0) AS comments,
-                json_extract(i.raw_metadata, '$.digest_type') AS digest_type
+                i.digest_type AS digest_type
             FROM items i
             JOIN evaluations e
               ON e.item_id = i.id
@@ -257,7 +257,6 @@ def get_digest_entries(db_path):
         )
 
         rows = cur.fetchall()
-
         return [
             {
                 "item_id": r["item_id"],

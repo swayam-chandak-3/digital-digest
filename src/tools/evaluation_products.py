@@ -158,7 +158,7 @@ def run_evaluation_textrank_product_pipeline(
     return evaluated_count
 
 
-def get_items_for_evaluation(db_path='mydb.db'):
+def get_items_for_evaluation(db_path):
     """
     Get items that need evaluation.
 
@@ -180,7 +180,7 @@ def get_items_for_evaluation(db_path='mydb.db'):
          AND e.persona = 'PRODUCT_IDEAS'
         WHERE i.status IN ('INGESTED', 'PREFILTERED')
           AND e.id IS NULL
-          AND json_extract(i.raw_metadata, '$.digest_type') = 'PRODUCT'
+          AND i.digest_type = 'PRODUCT'
           AND DATE(i.ingestion_time) = DATE('now')
         ORDER BY
           i.ingestion_time DESC,

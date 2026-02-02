@@ -264,10 +264,10 @@ def run_reddit_pipeline(
         
         total_inserted = 0
         if sideproject_items:
-            inserted = save_items_to_db(sideproject_items, db_path=str(db_path), digest_type="PROJECT")
+            inserted = save_items_to_db(sideproject_items, db_path=str(db_path), digest_type="PRODUCT")
             total_inserted += inserted
             if verbose:
-                print(f"  [PROJECT] Inserted {inserted} items from sideproject")
+                print(f"  [PRODUCT] Inserted {inserted} items from sideproject")
         if other_items:
             inserted = save_items_to_db(other_items, db_path=str(db_path), digest_type="GENAI")
             total_inserted += inserted
