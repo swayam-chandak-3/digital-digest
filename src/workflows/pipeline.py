@@ -223,7 +223,7 @@ def run_reddit_pipeline(
     hours_window: int = REDDIT_TIME_WINDOW_HOURS,
     limit_per_subreddit: int = REDDIT_LIMIT_PER_SUBREDDIT,
     listing_page_limit: int = REDDIT_LISTING_PAGE_LIMIT,
-    output_dir: str = "output_reddit",
+    output_dir: str = "output/output_reddit",
     verbose: bool = True,
     persist_to_db: bool = True,
     db_path: Path = DB_PATH,
@@ -1033,7 +1033,7 @@ def save_filtered_articles(articles, output_file='HackerNews/llm_programming_art
     return output_file
 
 
-def run_pipeline(num_pages=3, delay=1, verbose=True, output_file='HackerNews/llm_programming_articles.json',
+def run_pipeline(num_pages=3, delay=1, verbose=True, output_file='output/HackerNews/llm_programming_articles.json',
                  hours_window=DEFAULT_HOURS_WINDOW, min_points=DEFAULT_MIN_POINTS, min_comments=DEFAULT_MIN_COMMENTS):
     """Run the complete pipeline with pre-filtering (time window + engagement)."""
     print("=" * 60)
@@ -1101,7 +1101,7 @@ def run_indiehackers_pipeline(
     hours_back: int = 24,
     keywords: Optional[List[str]] = None,
     min_engagement: int = 0,
-    outputs_dir: str = "output_products",
+    outputs_dir: str = "output/output_products",
     db_path: str = str(DB_PATH),
     verbose: bool = True
 ) -> str:
@@ -1252,7 +1252,7 @@ if __name__ == '__main__':
                        help='Which pipeline to run (default: hackernews)')
     parser.add_argument('--pages', type=int, default=3, help='Number of Hacker News pages to scrape (max 20, default: 3)')
     parser.add_argument('--delay', type=float, default=1, help='Delay between article requests (seconds)')
-    parser.add_argument('--output', type=str, default='HackerNews/llm_programming_articles.json',
+    parser.add_argument('--output', type=str, default='output/HackerNews/llm_programming_articles.json',
                        help='Hacker News output file path')
     parser.add_argument('--hours-window', type=int, default=DEFAULT_HOURS_WINDOW,
                        help='HN pre-filter: only items from last N hours (default: 24)')
@@ -1264,7 +1264,7 @@ if __name__ == '__main__':
                        help='Indie Hackers source (default: tech)')
     parser.add_argument('--ih-limit', type=int, default=10, help='Indie Hackers item limit (default: 10)')
     parser.add_argument('--ih-hours-back', type=int, default=None, help='Indie Hackers hours back (default: env or 24)')
-    parser.add_argument('--ih-output-dir', type=str, default='output_products',
+    parser.add_argument('--ih-output-dir', type=str, default='output/output_products',
                        help='Indie Hackers output directory')
     parser.add_argument('--ih-keywords', type=str, default=None,
                        help='Indie Hackers keyword prefilter (comma-separated)')
@@ -1277,7 +1277,7 @@ if __name__ == '__main__':
     parser.add_argument('--model', type=str, default='gemma3:12b', help='Ollama model name')
     parser.add_argument('--hours', type=int, default=24, help='Hours to look back for recent items')
     parser.add_argument('--no-reddit', action='store_true', help='Skip Reddit scraper')
-    parser.add_argument('--reddit-output-dir', type=str, default='output_reddit', help='Output directory for Reddit JSON')
+    parser.add_argument('--reddit-output-dir', type=str, default='output/output_reddit', help='Output directory for Reddit JSON')
     parser.add_argument('--reddit-hours-window', type=int, default=REDDIT_TIME_WINDOW_HOURS,
                        help='Reddit: only items from last N hours')
     parser.add_argument('--reddit-limit', type=int, default=REDDIT_LIMIT_PER_SUBREDDIT,
