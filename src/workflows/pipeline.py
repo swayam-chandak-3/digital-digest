@@ -22,6 +22,8 @@ from ..tools.db_utils import save_items_to_db, categorize_article
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from .scrape import run_pipeline as run_scrape_pipeline
+from ..tools.evaluation import run_evaluation_textrank_pipeline
+from ..tools.evaluation_products import run_evaluation_textrank_product_pipeline
 
 DB_PATH = Path(os.getenv('DB_PATH', 'evalution.db'))
 
@@ -1369,4 +1371,28 @@ if __name__ == '__main__':
         # Run scrape pipeline for articles
         run_scrape_pipeline(
             verbose=not args.quiet
+        )
+
+        # After scraping is done, start evaluation
+        print("\n" + "="*60)
+        print("SCRAPING COMPLETED - STARTING EVALUATION")
+        print("="*60)
+        run_evaluation_textrank_pipeline(
+            db_path=str(DB_PATH),
+            ollama_base_url=args.ollama_url,
+            model=args.model,
+            hours=args.hours,
+            verbose=not args.quiet,
+            timeout=180,
+            top_n_sentences=5,
+        )
+
+        # Call evaluation_products
+        run_evaluation_textrank_product_pipeline(
+            db_path=str(DB_PATH),
+            ollama_base_url=args.ollama_url,
+            model=args.model,
+            verbose=not args.quiet,
+            timeout=180,
+            top_n_sentences=5,
         )

@@ -157,7 +157,7 @@ def run_evaluation_textrank_product_pipeline(
 
     return evaluated_count
 
-limit = Path(os.getenv('LIMIT', 5))
+limit = int(os.getenv('LIMIT', 5))
 def get_items_for_evaluation(db_path):
     """
     Get top 5 items that need evaluation, ranked by engagement score (likes + comments).
@@ -190,7 +190,7 @@ def get_items_for_evaluation(db_path):
         LIMIT ?
         """
 
-        cur.execute(query, (limit))
+        cur.execute(query, (limit,))
         rows = cur.fetchall()
 
         items = []

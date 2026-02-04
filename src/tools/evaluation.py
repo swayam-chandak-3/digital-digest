@@ -86,7 +86,7 @@ def _process_one_item(item, ollama_base_url, model, timeout, db_path, top_n_sent
 
 
 def run_evaluation_textrank_pipeline(
-    db_path=r'C:/Users/SwayamShivkumarChand/Desktop/Learning/Project/Daily Digest/daily-digest/digital-digest/src/models/mydb.db',
+    db_path=DB_PATH,
     ollama_base_url='http://localhost:11434',
     model='llama3.1',
     hours=24,
@@ -163,7 +163,7 @@ def run_evaluation_textrank_pipeline(
 
     return evaluated_count
 
-limit=Path(os.getenv('LIMIT', 5))
+limit = int(os.getenv('LIMIT', 5))
 def get_items_for_evaluation(db_path='mydb.db', hours=24):
     """
     Get top 5 items that need evaluation, ranked by engagement score (likes + comments).
@@ -192,10 +192,10 @@ def get_items_for_evaluation(db_path='mydb.db', hours=24):
         ORDER BY
           (COALESCE(i.likes, 0) + COALESCE(i.comments, 0)) DESC,
           i.ingestion_time DESC
-        LIMIT 5
+        LIMIT ?
         """
 
-        cur.execute(query, (limit))
+        cur.execute(query, (limit,))
         rows = cur.fetchall()
 
         items = []

@@ -125,15 +125,19 @@
 -- );
 
 -- -- delete from item_summaries;
--- -- delete from evaluations;
+-- delete from evaluations;
 -- -- delete from embeddings;
 -- -- delete from dedup_item_cluster;
 -- -- delete from dedup_clusters;
--- -- delete from items;
+-- delete from items;
 
-UPDATE users
-SET telegramid = 1676531263
-where id=2;
+-- UPDATE users
+-- SET telegramid = 1676531263
+-- where id=2;
+
+-- update items 
+-- set status='INGESTED'
+-- where digest_type='GENAI';
 
 -- -- Add summary column to items if it does not exist (run once on existing DBs):
 -- -- ALTER TABLE items ADD COLUMN summary TEXT;
