@@ -85,7 +85,7 @@ def _process_one_item(item, ollama_base_url, model, timeout, db_path, top_n_sent
 def run_evaluation_textrank_product_pipeline(
     db_path=str(DB_PATH),
     ollama_base_url='http://localhost:11434',
-    model='gemma3:12b',
+    model='llama3.1',
     verbose=True,
     timeout=180,
     top_n_sentences=5,
@@ -157,23 +157,25 @@ def run_evaluation_textrank_product_pipeline(
 
     return evaluated_count
 
-
+limit = Path(os.getenv('LIMIT', 5))
 def get_items_for_evaluation(db_path):
     """
-    Get items that need evaluation.
+    Get top 5 items that need evaluation, ranked by engagement score (likes + comments).
 
     Criteria:
     - Status is 'INGESTED' or 'PREFILTERED'
     - Not already evaluated for PRODUCT_IDEAS persona
     - digest_type is 'PRODUCT' (from raw_metadata JSON)
     - ingestion_time is today's date (regardless of current time)
+    - Top 5 based on engagement score (likes + comments)
     """
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
 
         query = """
-        SELECT i.id, i.title, i.content, i.url, i.published_at, i.source, i.status
+        SELECT i.id, i.title, i.content, i.url, i.published_at, i.source, i.status,
+               COALESCE(i.likes, 0) as likes, COALESCE(i.comments, 0) as comments
         FROM items i
         LEFT JOIN evaluations e
           ON i.id = e.item_id
@@ -183,15 +185,20 @@ def get_items_for_evaluation(db_path):
           AND i.digest_type = 'PRODUCT'
           AND DATE(i.ingestion_time) = DATE('now')
         ORDER BY
-          i.ingestion_time DESC,
-          i.id DESC
+          (COALESCE(i.likes, 0) + COALESCE(i.comments, 0)) DESC,
+          i.ingestion_time DESC
+        LIMIT ?
         """
 
-        cur.execute(query)
+        cur.execute(query, (limit))
         rows = cur.fetchall()
 
         items = []
         for row in rows:
+            likes = row[7] if row[7] is not None else 0
+            comments = row[8] if row[8] is not None else 0
+            engagement_score = likes + comments
+            
             items.append({
                 'id': row[0],
                 'title': row[1],
@@ -200,6 +207,9 @@ def get_items_for_evaluation(db_path):
                 'published_at': row[4],
                 'source': row[5],
                 'status': row[6],
+                'likes': likes,
+                'comments': comments,
+                'engagement_score': engagement_score,
             })
 
         return items

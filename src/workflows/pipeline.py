@@ -2,6 +2,7 @@
 import sys
 import collections
 import os
+import asyncio
 import requests
 import time
 import re
@@ -739,6 +740,14 @@ def extract_article_content(url, timeout=10):
         response = requests.get(url, headers=headers, timeout=timeout)
         response.raise_for_status()
         
+        # Check for encoding issues (REPLACEMENT CHARACTER U+FFFD indicates decoding problems)
+        if '\ufffd' in response.text:
+            return {
+                'success': False,
+                'error': 'Character encoding error - undecodable characters detected',
+                'encoding_error': True,
+            }
+        
         # Build a soup of the full page once for metadata extraction
         full_soup = BeautifulSoup(response.content, 'html.parser')
         author, publish_datetime = _extract_metadata(full_soup)
@@ -748,6 +757,14 @@ def extract_article_content(url, timeout=10):
             doc = Document(response.content)
             title = doc.title()
             content_html = doc.summary()
+            
+            # Check for encoding issues in extracted content
+            if '\ufffd' in content_html:
+                return {
+                    'success': False,
+                    'error': 'Character encoding error - undecodable characters in content',
+                    'encoding_error': True,
+                }
             
             soup = BeautifulSoup(content_html, 'html.parser')
             for script in soup(["script", "style", "nav", "header", "footer", "aside"]):
@@ -780,6 +797,15 @@ def extract_article_content(url, timeout=10):
             title_elem = soup.find('title')
             title = title_elem.get_text().strip() if title_elem else "No Title"
             text = article.get_text()
+            
+            # Check for encoding issues in extracted text
+            if '\ufffd' in text:
+                return {
+                    'success': False,
+                    'error': 'Character encoding error - undecodable characters in article text',
+                    'encoding_error': True,
+                }
+            
             lines = (line.strip() for line in text.splitlines())
             chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
             text = '\n'.join(chunk for chunk in chunks if chunk)
@@ -828,78 +854,108 @@ def _parse_time_ago_to_hours(time_ago_str):
     return None
 
 
-def scrape_hackernews_pages(num_pages=1, verbose=False):
-    """Scrape Hacker News and extract URL, title, points, comments, and time_ago per item."""
+async def scrape_hackernews_pages(num_pages=1, verbose=False):
+    """Asynchronously scrape Hacker News and extract URL, title, points, comments, and time_ago per item."""
     if not os.path.exists('HackerNews'):
         os.makedirs('HackerNews')
     
     all_entries = []
     num_pages = min(num_pages, 20)
     
-    for page_no in range(1, num_pages + 1):
-        if verbose:
-            print(f'Fetching Hacker News Page {page_no}...')
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        )
+    }
+    
+    async with httpx.AsyncClient(headers=headers, timeout=30) as client:
+        tasks = [
+            _fetch_hn_page(client, page_no, verbose)
+            for page_no in range(1, num_pages + 1)
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        try:
-            res = requests.get('https://news.ycombinator.com/?p=' + str(page_no))
-            soup = BeautifulSoup(res.content, 'html.parser')
-            # Rows: tr.athing = title row; next tr = subtext (points, time, comments)
-            athing_rows = soup.find_all('tr', class_='athing')
-            
-            for tr in athing_rows:
-                row_id = tr.get('id')
-                title_span = tr.find('span', class_='titleline')
-                if not title_span:
-                    continue
-                a = title_span.find('a', href=True)
-                if not a:
-                    continue
-                url = a['href']
-                if not url.startswith('http'):
-                    url = 'https://news.ycombinator.com/' + url
-                title = a.get_text(strip=True)
-                # Skip "More" link and HN-internal (discussion) links; only keep external article URLs
-                if url.startswith('?p=') or ('news.ycombinator.com' in url and 'item' in url):
-                    continue
-                # Find subline row (next sibling tr contains points, time, comments)
-                subline_tr = tr.find_next_sibling('tr')
-                points = 0
-                num_comments = 0
-                time_ago_str = ''
-                if subline_tr:
-                    subline = subline_tr.find('span', class_='subline') or subline_tr
-                    line_text = subline.get_text() if subline else ''
-                    # e.g. "51 points by user 2 hours ago | 40 comments"
-                    pm = re.search(r'(\d+)\s*points?', line_text, re.I)
-                    if pm:
-                        points = int(pm.group(1))
-                    cm = re.search(r'(\d+)\s*comments?', line_text, re.I)
-                    if cm:
-                        num_comments = int(cm.group(1))
-                    # "X minutes/hours/days ago"
-                    tam = re.search(r'(\d+\s*(?:minute|hour|day)s?\s*ago)', line_text, re.I)
-                    if tam:
-                        time_ago_str = tam.group(1)
-                
-                all_entries.append({
-                    'url': url,
-                    'title': title,
-                    'points': points,
-                    'num_comments': num_comments,
-                    'time_ago_str': time_ago_str,
-                })
-            
-            if verbose:
-                print(f'  Found {len(athing_rows)} items on page {page_no}')
-        
-        except Exception as e:
-            print(f'Error fetching page {page_no}: {e}')
+        for result in results:
+            if isinstance(result, Exception):
+                print(f'Error fetching page: {result}')
+            elif result:
+                all_entries.extend(result)
     
     return all_entries
 
 
-def apply_prefilter(entries, hours_window=24, min_points=0, min_comments=0, verbose=False):
-    """Apply time window and engagement thresholds. Returns list of entries that pass."""
+async def _fetch_hn_page(client: httpx.AsyncClient, page_no: int, verbose: bool = False) -> List[Dict]:
+    """Fetch a single Hacker News page asynchronously."""
+    entries = []
+    
+    if verbose:
+        print(f'Fetching Hacker News Page {page_no}...')
+    
+    try:
+        response = await client.get('https://news.ycombinator.com/?p=' + str(page_no))
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Rows: tr.athing = title row; next tr = subtext (points, time, comments)
+        athing_rows = soup.find_all('tr', class_='athing')
+        
+        for tr in athing_rows:
+            row_id = tr.get('id')
+            title_span = tr.find('span', class_='titleline')
+            if not title_span:
+                continue
+            a = title_span.find('a', href=True)
+            if not a:
+                continue
+            url = a['href']
+            if not url.startswith('http'):
+                url = 'https://news.ycombinator.com/' + url
+            title = a.get_text(strip=True)
+            # Skip "More" link and HN-internal (discussion) links; only keep external article URLs
+            if url.startswith('?p=') or ('news.ycombinator.com' in url and 'item' in url):
+                continue
+            # Find subline row (next sibling tr contains points, time, comments)
+            subline_tr = tr.find_next_sibling('tr')
+            points = 0
+            num_comments = 0
+            time_ago_str = ''
+            if subline_tr:
+                subline = subline_tr.find('span', class_='subline') or subline_tr
+                line_text = subline.get_text() if subline else ''
+                # e.g. "51 points by user 2 hours ago | 40 comments"
+                pm = re.search(r'(\d+)\s*points?', line_text, re.I)
+                if pm:
+                    points = int(pm.group(1))
+                cm = re.search(r'(\d+)\s*comments?', line_text, re.I)
+                if cm:
+                    num_comments = int(cm.group(1))
+                # "X minutes/hours/days ago"
+                tam = re.search(r'(\d+\s*(?:minute|hour|day)s?\s*ago)', line_text, re.I)
+                if tam:
+                    time_ago_str = tam.group(1)
+            
+            entries.append({
+                'url': url,
+                'title': title,
+                'points': points,
+                'num_comments': num_comments,
+                'time_ago_str': time_ago_str,
+            })
+        
+        if verbose:
+            print(f'  Found {len(athing_rows)} items on page {page_no}')
+    
+    except Exception as e:
+        print(f'Error fetching page {page_no}: {e}')
+        raise
+    
+    return entries
+
+
+async def apply_prefilter(entries, hours_window=24, min_points=0, min_comments=0, verbose=False):
+    """Asynchronously apply time window and engagement thresholds. Returns list of entries that pass."""
     filtered = []
     for e in entries:
         # Time window: last N hours
@@ -919,8 +975,8 @@ def apply_prefilter(entries, hours_window=24, min_points=0, min_comments=0, verb
         filtered.append(e)
     return filtered
 
-def scrape_and_categorize_articles(entries, delay=1, verbose=False):
-    """Scrape full article content and apply keyword-based category filter.
+async def scrape_and_categorize_articles(entries, delay=1, verbose=False):
+    """Asynchronously scrape full article content and apply keyword-based category filter.
     entries: list of dicts with url, title, points, num_comments, time_ago_str from HN listing.
     """
     target_categories = ['LLM/AI']  # Only AI/LLM articles (keyword relevance)
@@ -929,23 +985,53 @@ def scrape_and_categorize_articles(entries, delay=1, verbose=False):
     print(f"\nScraping {len(entries)} articles (keyword + category filter)...")
     print("=" * 60)
     
-    for i, entry in enumerate(entries, 1):
+    # Create tasks for all entries with concurrency control
+    semaphore = asyncio.Semaphore(5)  # Limit to 5 concurrent requests
+    tasks = [
+        _process_hn_entry(entry, i, len(entries), verbose, semaphore, delay)
+        for i, entry in enumerate(entries, 1)
+    ]
+    
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    for result in results:
+        if isinstance(result, Exception):
+            print(f'Error processing entry: {result}')
+        elif result:
+            filtered_articles.append(result)
+    
+    return filtered_articles
+
+
+async def _process_hn_entry(entry, index, total, verbose, semaphore, delay):
+    """Process a single Hacker News entry asynchronously."""
+    target_categories = ['LLM/AI']
+    
+    async with semaphore:
         url = entry.get('url', '')
         if verbose:
-            print(f"[{i}/{len(entries)}] Processing: {url[:60]}...")
+            print(f"[{index}/{total}] Processing: {url[:60]}...")
+        
+        # Add async delay between requests
+        await asyncio.sleep(delay)
         
         result = extract_article_content(url)
+        
+        # Skip articles with encoding errors
+        if result.get('encoding_error'):
+            if verbose:
+                print(f"    [SKIP] Encoding error: {result.get('error', 'Unknown error')}")
+            return None
         
         if not result.get('success'):
             if verbose:
                 print(f"    Failed: {result.get('error', 'Unknown error')}")
-            continue
+            return None
         
         title = result.get('title', 'No Title')
         text = result.get('text', '')
         author = result.get('author')
         publish_datetime = hn_time_ago_to_utc(entry.get('time_ago_str'))
-
         
         parsed = urlparse(url)
         domain = parsed.netloc.replace('www.', '')
@@ -974,17 +1060,13 @@ def scrape_and_categorize_articles(entries, delay=1, verbose=False):
                 'num_comments': num_comments,
                 'engagement_score': engagement_score,
             }
-            filtered_articles.append(article_data)
             if verbose:
                 print(f"    [MATCH] {primary_category}: {title[:50]}... (pts={points}, comments={num_comments})")
+            return article_data
         else:
             if verbose:
                 print(f"    [SKIP] Categories: {categories if categories else 'Uncategorized'}")
-        
-        if i < len(entries):
-            time.sleep(delay)
-    
-    return filtered_articles
+            return None
 
 
 def hn_time_ago_to_utc(time_ago_str):
@@ -1049,15 +1131,15 @@ def save_filtered_articles(articles, output_file='HackerNews/llm_programming_art
     return output_file
 
 
-def run_pipeline(num_pages=3, delay=1, verbose=True, output_file='output/HackerNews/llm_programming_articles.json',
-                 hours_window=DEFAULT_HOURS_WINDOW, min_points=DEFAULT_MIN_POINTS, min_comments=DEFAULT_MIN_COMMENTS):
-    """Run the complete pipeline with pre-filtering (time window + engagement)."""
+async def run_pipeline(num_pages=3, delay=1, verbose=True, output_file='output/HackerNews/llm_programming_articles.json',
+                       hours_window=DEFAULT_HOURS_WINDOW, min_points=DEFAULT_MIN_POINTS, min_comments=DEFAULT_MIN_COMMENTS):
+    """Asynchronously run the complete Hacker News pipeline with pre-filtering (time window + engagement)."""
     print("=" * 60)
     print("HACKER NEWS PIPELINE")
     print("=" * 60)
     print("\nStep 1: Scraping Hacker News (with engagement metrics)...")
     
-    entries = scrape_hackernews_pages(num_pages, verbose)
+    entries = await scrape_hackernews_pages(num_pages, verbose)
     print(f"\n[OK] Found {len(entries)} items from Hacker News")
     
     if not entries:
@@ -1066,7 +1148,7 @@ def run_pipeline(num_pages=3, delay=1, verbose=True, output_file='output/HackerN
     
     # Pre-filter: time window (last N hours) + engagement thresholds
     print(f"\nStep 2: Pre-filtering (last {hours_window}h, min_points={min_points}, min_comments={min_comments})...")
-    entries = apply_prefilter(entries, hours_window=hours_window, min_points=min_points, min_comments=min_comments, verbose=verbose)
+    entries = await apply_prefilter(entries, hours_window=hours_window, min_points=min_points, min_comments=min_comments, verbose=verbose)
     print(f"[OK] {len(entries)} items pass pre-filter")
     
     if not entries:
@@ -1075,7 +1157,7 @@ def run_pipeline(num_pages=3, delay=1, verbose=True, output_file='output/HackerN
     
     # Step 3: Scrape full content and apply keyword/category filter (LLM/AI only)
     print("\nStep 3: Scraping articles and keyword/category filtering...")
-    filtered_articles = scrape_and_categorize_articles(entries, delay, verbose)
+    filtered_articles = await scrape_and_categorize_articles(entries, delay, verbose)
     
     print(f"\n[OK] Found {len(filtered_articles)} articles matching LLM/AI category")
     
@@ -1188,78 +1270,6 @@ def run_indiehackers_pipeline(
 
     return output_path
 
-
-def run_evaluation_pipeline(db_path=DB_PATH, ollama_base_url='http://localhost:11434', 
-                           model='gemma3:12b', hours=24, verbose=True, timeout=180, max_workers=3):
-    """Run the evaluation pipeline on items that need evaluation.
-    
-    Filters items by:
-    - Published in last 24 hours (or specified hours)
-    - Status is INGESTED or PREFILTERED
-    - Not already evaluated
-    
-    Evaluates up to max_workers items concurrently with Gemma3 and saves results.
-    """
-    print("=" * 60)
-    print("EVALUATION PIPELINE")
-    print("=" * 60)
-    
-    print(f"\nStep 1: Fetching items for evaluation (published in last {hours} hours)...")
-    items = get_items_for_evaluation(db_path, hours)
-    
-    if not items:
-        print("[OK] No items found that need evaluation.")
-        return 0
-    
-    print(f"[OK] Found {len(items)} items to evaluate (up to {max_workers} concurrent)")
-    
-    print(f"\nStep 2: Evaluating items with Gemma3 ({model})...")
-    evaluated_count = 0
-    error_count = 0
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_item = {
-            executor.submit(
-                _evaluate_one_item,
-                item,
-                ollama_base_url,
-                model,
-                timeout,
-                db_path,
-            ): item
-            for item in items
-        }
-        for future in as_completed(future_to_item):
-            item = future_to_item[future]
-            try:
-                item_id, evaluation, err = future.result()
-                if err:
-                    error_count += 1
-                    if verbose:
-                        print(f"    [ERROR] {item['title'][:50]}...: {err}")
-                    continue
-                if save_evaluation(item_id, evaluation, persona='GENAI_NEWS', db_path=db_path, evaluation_type='FULL'):
-                    evaluated_count += 1
-                    if verbose:
-                        decision = evaluation['decision']
-                        score = evaluation['relevance_score']
-                        print(f"    [{decision}] Relevance: {score:.2f} | Topic: {evaluation['topic']} | {item['title'][:45]}...")
-                else:
-                    error_count += 1
-                    if verbose:
-                        print(f"    [ERROR] Failed to save evaluation for item {item_id}")
-            except Exception as e:
-                error_count += 1
-                if verbose:
-                    print(f"    [ERROR] {item['title'][:50]}...: {e}")
-    
-    print(f"\n[OK] Evaluation complete!")
-    print(f"[OK] Evaluated: {evaluated_count} items")
-    if error_count > 0:
-        print(f"[WARNING] Errors: {error_count} items")
-    
-    return evaluated_count
-
 if __name__ == '__main__':
     import argparse
     
@@ -1307,14 +1317,9 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     if args.eval_only:
-        # Only run evaluation
-        run_evaluation_pipeline(
-            db_path=DB_PATH,
-            ollama_base_url=args.ollama_url,
-            model=args.model,
-            hours=args.hours,
-            verbose=not args.quiet
-        )
+        # Evaluation functionality has been moved to evaluation.py
+        # Use evaluation module directly for evaluation tasks
+        print("[INFO] Evaluation logic has been moved to evaluation.py module")
     else:
         env = _load_env()
 
@@ -1332,7 +1337,7 @@ if __name__ == '__main__':
             )
 
         if args.pipeline in {'hackernews', 'both'}:
-            run_pipeline(
+            asyncio.run(run_pipeline(
                 num_pages=min(args.pages, 20),
                 delay=args.delay,
                 verbose=not args.quiet,
@@ -1340,7 +1345,7 @@ if __name__ == '__main__':
                 hours_window=args.hours_window,
                 min_points=args.min_points,
                 min_comments=args.min_comments,
-            )
+            ))
 
         if args.pipeline in {'indiehackers', 'both'}:
             hours_back = args.ih_hours_back if args.ih_hours_back is not None else _get_int(
@@ -1360,16 +1365,6 @@ if __name__ == '__main__':
                 db_path=str(DB_PATH),
                 verbose=not args.quiet
             )
-        
-        # Run evaluation after ingestion
-        # print("\n" + "=" * 60)
-        # run_evaluation_pipeline(
-        #     db_path=DB_PATH,
-        #     ollama_base_url=args.ollama_url,
-        #     model=args.model,
-        #     hours=args.hours,
-        #     verbose=not args.quiet
-        # )
 
         # Run scrape pipeline for articles
         run_scrape_pipeline(

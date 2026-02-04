@@ -72,7 +72,7 @@ def _process_one_item(item, ollama_base_url, model, timeout, db_path, top_n_sent
         if not summary.strip():
             summary = (item.get('title') or '')[:500]
         update_item_summary(item['id'], summary, db_path=db_path)
-        evaluation = evaluate_with_gemma3(
+        evaluation = evaluate_with_llm(
             title=item['title'],
             content=summary,
             url=item['url'] or '',
@@ -100,7 +100,7 @@ def run_evaluation_textrank_pipeline(
     1. Fetch items that need evaluation (same criteria as evaluation.py).
     2. For each item: TextRank (graph-based) summary → top N sentences.
     3. Save summary to items.summary.
-    4. Evaluate with Gemma using summary (same output: relevance_score, topic, why_it_matters, target_audience, decision).
+    4. Evaluate with LLM using summary (same output: relevance_score, topic, why_it_matters, target_audience, decision).
     5. Save to evaluations table.
     """
     print("=" * 60)
@@ -109,12 +109,13 @@ def run_evaluation_textrank_pipeline(
 
     print(f"\nStep 1: Fetching items for evaluation (published in last {hours} hours)...")
     items = get_items_for_evaluation(db_path, hours)
+    
 
     if not items:
         print("[OK] No items found that need evaluation.")
         return 0
 
-    print(f"[OK] Found {len(items)} items (summarize with TextRank top {top_n_sentences} sentences, then evaluate with {model})")
+    print(f"[OK] Found {len(items)} items (summarize with TextRank top {top_n_sentences} sentences, then evaluate)")
 
     print("\nStep 2: Building TextRank summaries and evaluating (one at a time)...")
     evaluated_count = 0
@@ -162,20 +163,25 @@ def run_evaluation_textrank_pipeline(
 
     return evaluated_count
 
+limit=Path(os.getenv('LIMIT', 5))
 def get_items_for_evaluation(db_path='mydb.db', hours=24):
     """
-    Get ALL items that need evaluation.
+    Get top 5 items that need evaluation, ranked by engagement score (likes + comments).
 
     Criteria:
     - Status is 'INGESTED' or 'PREFILTERED'
     - Not already evaluated for GENAI_NEWS persona
+    - Top 5 based on engagement score (likes + comments)
+    
+    Returns items with engagement_score calculated as: likes + comments
     """
     conn = sqlite3.connect(db_path)
     try:
         cur = conn.cursor()
 
         query = """
-        SELECT i.id, i.title, i.content, i.url, i.published_at, i.source, i.status
+        SELECT i.id, i.title, i.content, i.url, i.published_at, i.source, i.status, 
+               COALESCE(i.likes, 0) as likes, COALESCE(i.comments, 0) as comments
         FROM items i
         LEFT JOIN evaluations e
           ON i.id = e.item_id
@@ -184,15 +190,20 @@ def get_items_for_evaluation(db_path='mydb.db', hours=24):
           AND i.digest_type = 'GENAI'
           AND e.id IS NULL
         ORDER BY
-          i.ingestion_time DESC,
-          i.id DESC
+          (COALESCE(i.likes, 0) + COALESCE(i.comments, 0)) DESC,
+          i.ingestion_time DESC
+        LIMIT 5
         """
 
-        cur.execute(query)
+        cur.execute(query, (limit))
         rows = cur.fetchall()
 
         items = []
         for row in rows:
+            likes = row[7] if row[7] is not None else 0
+            comments = row[8] if row[8] is not None else 0
+            engagement_score = likes + comments
+            
             items.append({
                 'id': row[0],
                 'title': row[1],
@@ -201,6 +212,9 @@ def get_items_for_evaluation(db_path='mydb.db', hours=24):
                 'published_at': row[4],
                 'source': row[5],
                 'status': row[6],
+                'likes': likes,
+                'comments': comments,
+                'engagement_score': engagement_score,
             })
 
         return items
@@ -208,8 +222,8 @@ def get_items_for_evaluation(db_path='mydb.db', hours=24):
         conn.close()
 
 
-def evaluate_with_gemma3(title, content, url, ollama_base_url='http://localhost:11434', model='gemma3', timeout=180, max_retries=2):
-    """Evaluate an article using Gemma3 via Ollama API.
+def evaluate_with_llm(title, content, url, ollama_base_url='http://localhost:11434', model='llama3.1', timeout=180, max_retries=2):
+    """Evaluate an article using LLM via Ollama API.
     
     Args:
         title: Article title
@@ -312,7 +326,7 @@ Respond ONLY with valid JSON, no additional text."""
         }
         
     except Exception as e:
-        print(f"Error evaluating with Gemma3: {e}")
+        print(f"Error evaluating: {e}")
         # Return default values on error
         return {
             'relevance_score': 0.0,
@@ -328,11 +342,11 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser(
-        description='Evaluation with TextRank summary: graph-based summarization (sumy), then evaluate with Gemma'
+        description='Evaluation with TextRank summary: graph-based summarization (sumy), then evaluate with LLM'
     )
     parser.add_argument('--db', type=str, default=DB_PATH, help='Database file path')
     parser.add_argument('--ollama-url', type=str, default='http://localhost:11434', help='Ollama base URL')
-    parser.add_argument('--model', type=str, default='gemma3:12b', help='Ollama model name')
+    parser.add_argument('--model', type=str, default='llama3.1', help='Ollama model name')
     parser.add_argument('--hours', type=int, default=24, help='Hours to look back (default: 24). Use 0 for no time limit.')
     parser.add_argument('--timeout', type=int, default=180, help='Request timeout in seconds')
     parser.add_argument('--top-n', type=int, default=5, help='Number of top TextRank sentences for summary (default: 5)')

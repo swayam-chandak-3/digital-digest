@@ -1,4 +1,4 @@
-"""Evaluation module for assessing article relevance using Gemma3 via Ollama."""
+"""Evaluation module for assessing article relevance using LLM via Ollama."""
 
 import json
 import re
@@ -13,8 +13,8 @@ from datetime import datetime, timedelta, timezone
 GENAI_NEWS_MIN_RELEVANCE = float(os.getenv('GENAI_NEWS_MIN_RELEVANCE', '0.6'))
 
 
-def evaluate_with_gemma3(title, content, url, ollama_base_url='http://localhost:11434', model='gemma3', timeout=180, max_retries=2):
-    """Evaluate an article using Gemma3 via Ollama API.
+def evaluate_with_llm(title, content, url, ollama_base_url='http://localhost:11434', model='llama3.1', timeout=180, max_retries=2):
+    """Evaluate an article using LLM via Ollama API.
     
     Args:
         title: Article title
@@ -119,7 +119,7 @@ Respond ONLY with valid JSON, no additional text."""
         }
         
     except Exception as e:
-        print(f"Error evaluating with Gemma3: {e}")
+        print(f"Error evaluating: {e}")
         # Return default values on error
         return {
             'relevance_score': 0.0,
@@ -233,7 +233,7 @@ def save_evaluation(item_id, evaluation_result, persona='GENAI_NEWS', db_path='m
 def _evaluate_one_item(item, ollama_base_url, model, timeout, db_path):
     """Evaluate a single item (for use with ThreadPoolExecutor). Returns (item_id, evaluation, error)."""
     try:
-        evaluation = evaluate_with_gemma3(
+        evaluation = evaluate_with_llm(
             title=item['title'],
             content=item['content'] or '',
             url=item['url'] or '',
@@ -247,7 +247,7 @@ def _evaluate_one_item(item, ollama_base_url, model, timeout, db_path):
 
 
 def run_evaluation_pipeline(db_path='mydb.db', ollama_base_url='http://localhost:11434', 
-                           model='gemma3:12b', hours=24, verbose=True, timeout=180, max_workers=3):
+                           model='llama3.1', hours=24, verbose=True, timeout=180, max_workers=3):
     """Run the evaluation pipeline on items that need evaluation.
     
     Filters items by:
@@ -255,7 +255,7 @@ def run_evaluation_pipeline(db_path='mydb.db', ollama_base_url='http://localhost
     - Status is INGESTED or PREFILTERED
     - Not already evaluated
     
-    Evaluates up to max_workers items concurrently with Gemma3 and saves results.
+    Evaluates up to max_workers items concurrently with LLM and saves results.
     """
     print("=" * 60)
     print("EVALUATION PIPELINE")
@@ -270,7 +270,7 @@ def run_evaluation_pipeline(db_path='mydb.db', ollama_base_url='http://localhost
     
     print(f"[OK] Found {len(items)} items to evaluate (up to {max_workers} concurrent)")
     
-    print(f"\nStep 2: Evaluating items with Gemma3 ({model})...")
+    print(f"\nStep 2: Evaluating items...")
     evaluated_count = 0
     error_count = 0
     
@@ -321,10 +321,10 @@ def run_evaluation_pipeline(db_path='mydb.db', ollama_base_url='http://localhost
 if __name__ == '__main__':
     import argparse
     
-    parser = argparse.ArgumentParser(description='Evaluation Pipeline: Evaluate articles using Gemma3 via Ollama')
+    parser = argparse.ArgumentParser(description='Evaluation Pipeline: Evaluate articles using LLM via Ollama')
     parser.add_argument('--db', type=str, default='mydb.db', help='Database file path')
     parser.add_argument('--ollama-url', type=str, default='http://localhost:11434', help='Ollama base URL')
-    parser.add_argument('--model', type=str, default='gemma3:12b', help='Ollama model name (default: gemma3:12b)')
+    parser.add_argument('--model', type=str, default='llama3.1', help='Ollama model name (default: llama3.1)')
     parser.add_argument('--hours', type=int, default=24, help='Hours to look back (default: 24). Use 0 for no time limit (all unevaluated items).')
     parser.add_argument('--timeout', type=int, default=180, help='Request timeout in seconds (default: 180)')
     parser.add_argument('--workers', type=int, default=3, help='Number of concurrent evaluations (default: 3)')
