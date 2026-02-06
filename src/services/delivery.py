@@ -14,7 +14,6 @@ import sqlite3
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timezone
-from urllib.parse import quote
 
 try:
     from dotenv import load_dotenv
@@ -31,6 +30,149 @@ DEFAULT_SOURCE = SUMMARY_SOURCE
 
 def _env(key, default=None):
     return os.environ.get(key, default)
+
+
+def get_users_with_topic_preferences(db_path):
+    """
+    Fetch all users from the database with their topic preferences.
+    Returns a list of dicts: {
+        'user_id': int,
+        'name': str,
+        'emailid': str,
+        'telegramid': str,
+        'topics': [{'topic_id': int, 'topic_name': str, 'score': int}, ...]
+    }
+    """
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        query = """
+            SELECT 
+                u.id as user_id,
+                u.name,
+                u.emailid,
+                u.telegramid,
+                utp.topic_id,
+                t.display_name as topic_name,
+                utp.score
+            FROM users u
+            LEFT JOIN user_topic_preferences utp ON u.id = utp.user_id
+            LEFT JOIN topics t ON utp.topic_id = t.id
+            ORDER BY u.id, utp.score DESC
+        """
+        
+        cursor.execute(query)
+        rows = cursor.fetchall()
+        conn.close()
+        
+        users_dict = {}
+        for row in rows:
+            user_id = row['user_id']
+            if user_id not in users_dict:
+                users_dict[user_id] = {
+                    'user_id': user_id,
+                    'name': row['name'],
+                    'emailid': row['emailid'],
+                    'telegramid': row['telegramid'],
+                    'topics': []
+                }
+            
+            if row['topic_id'] is not None:
+                users_dict[user_id]['topics'].append({
+                    'topic_id': row['topic_id'],
+                    'topic_name': row['topic_name'],
+                    'score': row['score']
+                })
+        
+        return list(users_dict.values())
+    except Exception as e:
+        print(f"[Delivery] Failed to fetch users with topic preferences: {e}")
+        return []
+
+
+def get_user_items_from_last_day(db_path, user_id, topic_ids):
+    """
+    Get all item summaries for a user based on their preferred topics.
+    Only returns items that were assigned to topics in the last 24 hours.
+    
+    Returns a list of dicts with item summary data:
+    {
+        'item_id': int,
+        'headline': str,
+        'lead': str,  # summary from items table
+        'why_it_matters': str,  # from evaluations table
+        'target_audience': str,
+        'url': str,
+        'likes': int,
+        'comments': int,
+        'topics': [topic_name, ...]  # All topics assigned to this item
+    }
+    """
+    if not topic_ids:
+        return []
+    
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        placeholders = ','.join('?' * len(topic_ids))
+        query = f"""
+            SELECT 
+                i.id as item_id,
+                i.title as headline,
+                i.summary as lead,
+                COALESCE(e.why_it_matters, i.description) as why_it_matters,
+                COALESCE(e.target_audience, 'developer') as target_audience,
+                i.url,
+                i.likes,
+                i.comments,
+                t.display_name as topic_name,
+                i.digest_type
+            FROM items i
+            JOIN item_topics it ON i.id = it.item_id
+            JOIN topics t ON it.topic_id = t.id
+            LEFT JOIN evaluations e ON i.id = e.item_id AND (e.persona = 'GENAI_NEWS' OR e.persona = 'PRODUCT_IDEAS')
+            WHERE t.id IN ({placeholders})
+              AND datetime(it.assigned_at) > datetime('now', '-1 day')
+            ORDER BY i.id DESC, (i.likes + i.comments) DESC
+        """
+        
+        cursor.execute(query, topic_ids)
+        rows = cursor.fetchall()
+        conn.close()
+        
+        # Aggregate topics per item (since an item can have multiple topics)
+        items_dict = {}
+        for row in rows:
+            item_id = row['item_id']
+            if item_id not in items_dict:
+                items_dict[item_id] = {
+                    'item_id': item_id,
+                    'headline': row['headline'],
+                    'lead': row['lead'],
+                    'why_it_matters': row['why_it_matters'],
+                    'target_audience': row['target_audience'] or 'developer',
+                    'url': row['url'],
+                    'likes': row['likes'] or 0,
+                    'comments': row['comments'] or 0,
+                    'topics': [],
+                    'digest_type': row['digest_type'] or 'GENAI'
+                }
+            
+            if row['topic_name'] not in items_dict[item_id]['topics']:
+                items_dict[item_id]['topics'].append(row['topic_name'])
+        
+        # Convert to list and sort by engagement
+        items = list(items_dict.values())
+        items.sort(key=lambda e: e['likes'] + e['comments'], reverse=True)
+        
+        return items
+    except Exception as e:
+        print(f"[Delivery] Failed to fetch user items: {e}")
+        return []
 
 
 def get_users_with_preferences(db_path):
@@ -138,7 +280,7 @@ def build_digest_html(entries, title="Daily Digest"):
         lead = _escape_html(e.get("lead") or "")
         why = _escape_html(e.get("why_it_matters") or "")
         audience = _escape_html(e.get("target_audience") or "developer")
-        topic = _escape_html(e.get("topic") or "")
+        topics = e.get("topics") or []  # Now expects a list
         likes = e.get("likes", 0)
         comments = e.get("comments", 0)
         url = (e.get("url") or "").strip()
@@ -146,8 +288,9 @@ def build_digest_html(entries, title="Daily Digest"):
         link_tag = f'<a{url_attr}>{headline}</a>' if url else headline
         parts.append("<li>")
         parts.append(f"<strong>{link_tag}</strong>")
-        if topic:
-            parts.append(f" <em>[{topic}]</em>")
+        if topics:
+            topic_tags = ", ".join([_escape_html(t) for t in topics])
+            parts.append(f" <em>[{topic_tags}]</em>")
         parts.append(f" &mdash; {audience}")
         parts.append(f" | 👍 {likes} | 💬 {comments}")
         if lead:
@@ -194,34 +337,29 @@ def _build_entry_markdown(entry, escape_for_telegram=True, include_digest_type_h
     Build markdown for a single entry.
     Returns the formatted entry text.
     If include_digest_type_header=True, add digest type header (PRODUCT or GEN AI) before the entry.
+    Topic tags are displayed as hashtags directly before the headline.
     """
     def esc(t):
-        return _escape_telegram_markdown(t) if escape_for_telegram else (t or "")
+        if t is None or t == "":
+            return ""
+        return _escape_telegram_markdown(str(t)) if escape_for_telegram else str(t)
     
     headline = entry.get("headline") or "(No title)"
     url = (entry.get("url") or "").strip()
-    lead = entry.get("lead") or ""
-    why = entry.get("why_it_matters") or ""
+    lead = entry.get("lead")
+    why = entry.get("why_it_matters")
     audience = entry.get("target_audience") or "developer"
-    topic = entry.get("topic") or ""
+    topics = entry.get("topics") or []  # Now expects a list of topics
     likes = entry.get("likes", 0)
     comments = entry.get("comments", 0)
     digest_type = entry.get("digest_type", "GENAI")
     
     entry_lines = []
     
-    if escape_for_telegram:
-        headline_esc = esc(headline)
-        lead_esc = esc(lead)
-        why_esc = esc(why)
-        audience_esc = esc(audience)
-        topic_esc = esc(topic)
-    else:
-        headline_esc = headline
-        lead_esc = lead
-        why_esc = why
-        audience_esc = audience
-        topic_esc = topic
+    headline_esc = esc(headline)
+    lead_esc = esc(lead)
+    why_esc = esc(why)
+    audience_esc = esc(audience)
     
     # Add digest type header if requested
     if include_digest_type_header:
@@ -231,17 +369,23 @@ def _build_entry_markdown(entry, escape_for_telegram=True, include_digest_type_h
         else:
             entry_lines.append(f"*{digest_type_label}*")
     
+    # Add topic tags as hashtags before the headline
+    if topics:
+        if escape_for_telegram:
+            # Escape the hashtag character for Telegram MarkdownV2
+            topic_hashtags = " ".join([f"\\#{esc(t.replace(' ', '_'))}" for t in topics])
+        else:
+            topic_hashtags = " ".join([f"#{esc(t.replace(' ', '_'))}" for t in topics])
+        entry_lines.append(f"   {topic_hashtags}")
+    
     # Build the link
     if url:
         entry_lines.append(f"• [{headline_esc}]({url})")
     else:
         entry_lines.append(f"• *{headline_esc}*")
     
-    # Topic and audience
-    if topic_esc:
-        entry_lines.append(f"   _{topic_esc}_ — {audience_esc}")
-    else:
-        entry_lines.append(f"   {audience_esc}")
+    # Audience
+    entry_lines.append(f"   {audience_esc}")
     
     # Engagement
     if escape_for_telegram:
@@ -249,16 +393,20 @@ def _build_entry_markdown(entry, escape_for_telegram=True, include_digest_type_h
     else:
         entry_lines.append(f"   👍 {likes} \\| 💬 {comments}")
     
-    # Add lead
-    if lead_esc:
-        entry_lines.append(f"   {lead_esc}")
+    # Add lead (summary) - always include if present
+    if lead_esc and lead_esc.strip():
+        entry_lines.append("")
+        entry_lines.append(f"*Summary:*")
+        entry_lines.append(f"{lead_esc}")
     
-    # Add why it matters
-    if why_esc:
+    # Add why it matters - always include if present
+    if why_esc and why_esc.strip():
+        entry_lines.append("")
         if escape_for_telegram:
-            entry_lines.append(f"*Why it matters:* {why_esc}")
+            entry_lines.append(f"*Why it matters:*")
         else:
-            entry_lines.append(f"*Why it matters*: {why_esc}")
+            entry_lines.append(f"*Why it matters*:")
+        entry_lines.append(f"{why_esc}")
     
     return "\n".join(entry_lines)
 
@@ -492,11 +640,19 @@ def run_delivery(
     verbose=True,
     separate_by_type=True,
     use_user_preferences=False,
+    use_topic_based_delivery=False,
 ):
     """
     Load digest entries, write JSON + Markdown files (always), then send via
     channels configured for this persona (email, telegram).
     Entries are sorted by total engagement (likes + comments) in descending order.
+    
+    If use_topic_based_delivery=True:
+    - Load all users with their topic preferences from user_topic_preferences
+    - For each user, fetch items assigned to their preferred topics (last 24 hours)
+    - Get item summaries from item_summaries table
+    - Send personalized digests to each user via Telegram
+    - This is the primary delivery method and overrides use_user_preferences
     
     If use_user_preferences=True:
     - Load all users from the database with their preferences
@@ -509,6 +665,76 @@ def run_delivery(
     - Adds digest type headers to each section
     """
     source = source or DEFAULT_SOURCE
+    
+    # If using topic-based delivery, handle it separately
+    if use_topic_based_delivery:
+        users = get_users_with_topic_preferences(db_path)
+        if not users:
+            if verbose:
+                print("[Delivery] No users found with topic preferences")
+            return {"users": 0, "sent": 0, "total_items_sent": 0}
+        
+        config = get_delivery_config(persona=persona)
+        sent_count = 0
+        total_items_sent = 0
+        
+        for user in users:
+            user_id = user['user_id']
+            name = user['name']
+            telegramid = user['telegramid']
+            topics = user['topics']
+            
+            if not telegramid or not telegramid.strip():
+                if verbose:
+                    print(f"[Delivery] Skipping user {user_id} ({name}): no Telegram ID")
+                continue
+            
+            if not topics:
+                if verbose:
+                    print(f"[Delivery] Skipping user {user_id} ({name}): no topic preferences")
+                continue
+            
+            topic_ids = [t['topic_id'] for t in topics]
+            user_items = get_user_items_from_last_day(db_path, user_id, topic_ids)
+            
+            if not user_items:
+                if verbose:
+                    print(f"[Delivery] No items from last 24h for user {user_id} ({name})")
+                continue
+            
+            if verbose:
+                print(f"\n[Delivery] User {user_id} ({name}): {len(user_items)} items from {len(topics)} topics")
+            
+            # Build user preference info
+            topic_names = [t['topic_name'] for t in topics]
+            prefs_str = ", ".join(topic_names) if topic_names else "No preferences"
+            user_title = f"Daily Digest - {name}\nPreferences: {prefs_str}"
+            
+            # Build and send Telegram messages
+            md_telegram_messages = build_digest_messages(
+                user_items,
+                title=user_title,
+                escape_for_telegram=True,
+                separate_by_type=separate_by_type
+            )
+            
+            success = send_telegram(
+                md_telegram_messages,
+                chat_id=telegramid,
+                bot_token=config["telegram_bot_token"],
+                verbose=verbose,
+            )
+            
+            if success:
+                sent_count += 1
+                total_items_sent += len(user_items)
+        
+        if verbose:
+            print(f"\n[Delivery] Topic-based delivery complete: {sent_count} users, {total_items_sent} items sent")
+        
+        return {"users": len(users), "sent": sent_count, "total_items_sent": total_items_sent}
+    
+    # Original behavior: load all digest entries
     try:
         entries = get_digest_entries(db_path=DB_PATH)
     except Exception as e:
@@ -639,6 +865,7 @@ if __name__ == "__main__":
     p.add_argument("--output-dir", default="output", help="Directory for JSON/MD fallback files")
     p.add_argument("--no-separate-types", action="store_true", help="Don't separate GENAI and PRODUCT entries")
     p.add_argument("--no-user-preferences", action="store_true", help="Disable personalized digests (send to env config instead)")
+    p.add_argument("--topic-based", default=True, action="store_true", help="Use topic-based delivery (fetch items from last 24h by user topic preferences)")
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args()
     run_delivery(
@@ -649,4 +876,5 @@ if __name__ == "__main__":
         verbose=not args.quiet,
         separate_by_type=not args.no_separate_types,
         use_user_preferences=not args.no_user_preferences,
+        use_topic_based_delivery=args.topic_based,
     )
