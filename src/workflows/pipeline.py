@@ -1302,7 +1302,7 @@ if __name__ == '__main__':
     parser.add_argument('--evaluate', action='store_true', help='Run evaluation pipeline after ingestion')
     parser.add_argument('--eval-only', action='store_true', help='Only run evaluation, skip ingestion')
     parser.add_argument('--ollama-url', type=str, default='http://localhost:11434', help='Ollama base URL')
-    parser.add_argument('--model', type=str, default='gemma3:12b', help='Ollama model name')
+    parser.add_argument('--model', type=str, default='llama3.1', help='Ollama model name')
     parser.add_argument('--hours', type=int, default=24, help='Hours to look back for recent items')
     parser.add_argument('--no-reddit', action='store_true', help='Skip Reddit scraper')
     parser.add_argument('--reddit-output-dir', type=str, default='output\output_reddit', help='Output directory for Reddit JSON')

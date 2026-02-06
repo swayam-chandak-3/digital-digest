@@ -24,6 +24,67 @@ DB_PATH = Path(os.getenv('DB_PATH', 'mydb.db'))
 
 GENAI_NEWS_MIN_RELEVANCE = 0.6
 
+# Predefined topics for GENAI_NEWS classification
+GENAI_TOPICS = [
+    "llm_research",       # LLM Research and Papers
+    "ai_tools",           # AI Tools and Applications
+    "ml_infrastructure",  # ML Infrastructure and MLOps
+    "prompt_engineering", # Prompt Engineering and Techniques
+    "ai_ethics",          # AI Ethics, Safety, and Alignment
+]
+
+
+def save_item_topics(item_id, evaluation_result, db_path=None):
+    """Save LLM-assigned topics to the item_topics table.
+    
+    Stores topics as boolean (presence = assigned).
+    
+    Args:
+        item_id: ID of the item in the items table
+        evaluation_result: Dictionary from evaluate_with_llm() containing 'topics'
+        db_path: Path to SQLite database (defaults to DB_PATH)
+        
+    Returns:
+        Number of topics assigned to the item
+    """
+    db_path = db_path or str(DB_PATH)
+    topics = evaluation_result.get('topics', [])
+    
+    if not topics:
+        return 0
+    
+    try:
+        # Import here to avoid circular imports
+        from src.services.topic_service import assign_topics_to_item
+        return assign_topics_to_item(item_id, topics, None, db_path)
+    except ImportError:
+        # Fallback: direct database insert if service not available
+        conn = sqlite3.connect(db_path)
+        try:
+            cur = conn.cursor()
+            assigned_count = 0
+            for topic_name in topics:
+                cur.execute("SELECT id FROM topics WHERE name = ?", (topic_name,))
+                row = cur.fetchone()
+                if not row:
+                    continue
+                topic_id = row[0]
+                cur.execute(
+                    """INSERT OR IGNORE INTO item_topics (item_id, topic_id, assigned_at)
+                       VALUES (?, ?, CURRENT_TIMESTAMP)""",
+                    (item_id, topic_id)
+                )
+                if cur.rowcount > 0:
+                    assigned_count += 1
+            conn.commit()
+            return assigned_count
+        except Exception as e:
+            conn.rollback()
+            print(f"[ERROR] Failed to save topics for item {item_id}: {e}")
+            return 0
+        finally:
+            conn.close()
+
 def summarize_by_textrank(text, top_n=5, language='english'):
     """
     Build extractive summary using TextRank (graph-based sentence ranking).
@@ -143,6 +204,12 @@ def run_evaluation_textrank_pipeline(
             # Save to evaluations table (mydb.db by default) with evaluation_type='TEXTRANK'
             if save_evaluation(item_id, evaluation, persona='GENAI_NEWS', db_path=db_path, evaluation_type='TEXTRANK'):
                 evaluated_count += 1
+                # Save topic assignments for KEEP items
+                if evaluation.get('decision') == 'KEEP' and evaluation.get('topics'):
+                    topics_saved = save_item_topics(item_id, evaluation, db_path=db_path)
+                    if verbose and topics_saved > 0:
+                        topic_names = evaluation.get('topics', [])
+                        print(f"        Topics: {', '.join(topic_names)}")
                 if verbose:
                     decision = evaluation['decision']
                     score = evaluation['relevance_score']
@@ -234,22 +301,41 @@ def evaluate_with_llm(title, content, url, ollama_base_url='http://localhost:114
         timeout: Request timeout in seconds (default: 180 for large models)
         max_retries: Maximum number of retry attempts (default: 2)
     
-    Returns a dict with: relevance_score, decision, topic, why_it_matters, target_audience
+    Returns a dict with: relevance_score, decision, topic, topics, topic_confidences, why_it_matters, target_audience
     """
-    # Prepare the prompt for GENAI_NEWS evaluation
+    # Build topic list for the prompt
+    topics_str = ", ".join(GENAI_TOPICS)
+    
+    # Prepare the prompt for GENAI_NEWS evaluation with topic classification
     prompt = f"""You are a technical news evaluator for AI engineers. 
-        Evaluate the following Hacker News article for relevance to AI/LLM/Programming news.
+Evaluate the following Hacker News article for relevance to AI/LLM/Programming news.
 
 Title: {title}
 URL: {url}
 Content: {content[:2000] if content else 'No content available'}
 
+AVAILABLE TOPICS FOR CLASSIFICATION:
+{topics_str}
+
+Topic descriptions:
+- llm_research: LLM Research, papers, transformer models, fine-tuning, training
+- ai_tools: AI-powered tools, chatbots, assistants, copilots, agents
+- ml_infrastructure: MLOps, deployment, inference, GPU, Kubernetes, serving
+- prompt_engineering: Prompt design, chain-of-thought, few-shot, RAG, retrieval
+- ai_ethics: AI safety, alignment, bias, ethics, responsible AI, hallucination
+
 Provide a JSON response with the following fields:
 - relevance_score: float between 0.0 and 1.0 (how relevant is this to AI/LLM/Programming?)
 - decision: "KEEP" or "DROP" (should this be included in the digest?)
-- topic: brief topic/category (e.g., "LLM Research", "AI Tools", "Programming Languages")
+- topic: brief topic/category description (e.g., "LLM Research", "AI Tools", "Programming Languages")
+- topics: list of 1-3 matching topic names from the AVAILABLE TOPICS above (use exact names)
+- topic_confidences: object mapping each topic name to a confidence score (0.0-1.0)
 - why_it_matters: 1-2 sentence explanation of why this matters
 - target_audience: one of "developer", "software architect", or "manager"
+
+Example topics and topic_confidences format:
+"topics": ["llm_research", "ai_tools"],
+"topic_confidences": {{"llm_research": 0.9, "ai_tools": 0.6}}
 
 Respond ONLY with valid JSON, no additional text."""
 
@@ -316,10 +402,32 @@ Respond ONLY with valid JSON, no additional text."""
                 raise ValueError(f"Could not parse JSON from response: {response_text[:200]}")
         
         # Validate and normalize the response
+        # Extract and validate topics
+        raw_topics = evaluation.get('topics', [])
+        # Filter to only valid predefined topics
+        valid_topics = [t for t in raw_topics if t in GENAI_TOPICS]
+        if not valid_topics and evaluation.get('topic'):
+            # Fallback: try to match the free-form topic to predefined topics
+            topic_lower = evaluation.get('topic', '').lower()
+            for t in GENAI_TOPICS:
+                if t.replace('_', ' ') in topic_lower or t.replace('_', '') in topic_lower.replace(' ', ''):
+                    valid_topics.append(t)
+                    break
+        
+        # Extract and validate topic confidences
+        raw_confidences = evaluation.get('topic_confidences', {})
+        topic_confidences = {k: float(v) for k, v in raw_confidences.items() if k in GENAI_TOPICS}
+        # Ensure all valid_topics have a confidence score
+        for t in valid_topics:
+            if t not in topic_confidences:
+                topic_confidences[t] = 1.0  # Default confidence
+        
         return {
             'relevance_score': float(evaluation.get('relevance_score', 0.0)),
             'decision': evaluation.get('decision', 'DROP').upper(),
             'topic': evaluation.get('topic', 'Unknown'),
+            'topics': valid_topics,
+            'topic_confidences': topic_confidences,
             'why_it_matters': evaluation.get('why_it_matters', ''),
             'target_audience': evaluation.get('target_audience', 'developer'),
             'llm_model': model
@@ -332,6 +440,8 @@ Respond ONLY with valid JSON, no additional text."""
             'relevance_score': 0.0,
             'decision': 'DROP',
             'topic': 'Error',
+            'topics': [],
+            'topic_confidences': {},
             'why_it_matters': f'Evaluation failed: {str(e)}',
             'target_audience': 'developer',
             'llm_model': model
